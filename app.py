@@ -1,4 +1,4 @@
-# app.py — LRS (含 SMA/EMA、年度報酬、月度熱力圖、交易統計)
+# app.py — LRS SMA/EMA 回測系統（含暖機、年/月報酬圖、風控指標）
 
 import os
 import yfinance as yf
@@ -19,11 +19,11 @@ else:
     matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# === Streamlit 設定 ===
-st.set_page_config(page_title="LRS 移動平均回測系統", page_icon="📈", layout="wide")
+# === Streamlit 頁面設定 ===
+st.set_page_config(page_title="LRS 回測系統", page_icon="📈", layout="wide")
 st.title("📊 Leverage Rotation Strategy — SMA / EMA 回測系統")
 
-# === 使用者輸入 ===
+# === 使用者輸入區 ===
 col1, col2, col3 = st.columns(3)
 with col1:
     symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, SPXL, BTC-USD）", "00631L.TW")
@@ -38,7 +38,7 @@ with col4:
 with col5:
     window = st.slider("均線天數", 50, 200, 200, 10)
 
-# === 主程式 ===
+# === 主回測流程 ===
 if st.button("開始回測 🚀"):
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
@@ -51,19 +51,22 @@ if st.button("開始回測 🚀"):
         st.stop()
 
     df = df_raw.copy()
-    if ma_type == "SMA":
-        df["MA"] = df["Close"].rolling(window=window).mean()
-    else:
-        df["MA"] = df["Close"].ewm(span=window, adjust=False).mean()
+    df["MA"] = (
+        df["Close"].rolling(window=window).mean()
+        if ma_type == "SMA"
+        else df["Close"].ewm(span=window, adjust=False).mean()
+    )
 
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Position"] = df["Signal"].shift(1).fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
+
+    # === 累積報酬 ===
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # 切掉暖機區間
+    # === 切掉暖機期間 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -86,7 +89,7 @@ if st.button("開始回測 🚀"):
     buy_count = len(buy_points)
     sell_count = len(sell_points)
 
-    # === 年度交易次數統計 ===
+    # === 年度交易統計 ===
     if buy_points or sell_points:
         buy_years = [d[0].year for d in buy_points]
         sell_years = [d[0].year for d in sell_points]
@@ -98,7 +101,7 @@ if st.button("開始回測 🚀"):
     else:
         years, buy_counts, sell_counts = [], [], []
 
-    # === 績效指標 ===
+    # === 績效計算 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
@@ -106,6 +109,21 @@ if st.button("開始回測 🚀"):
     cagr_bh = (1 + final_return_bh) ** (1 / years_len) - 1
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
+
+    # === 風控指標 ===
+    loss_streak = (df["Strategy_Return"] < 0).astype(int)
+    max_consecutive_loss = (
+        loss_streak.groupby(loss_streak.diff().ne(0).cumsum())
+        .transform("size")[loss_streak == 1]
+        .max()
+    )
+
+    flat_days = (df["Position"] == 0).astype(int)
+    max_flat_days = (
+        flat_days.groupby(flat_days.diff().ne(0).cumsum())
+        .transform("size")[flat_days == 1]
+        .max()
+    )
 
     # === 主圖 ===
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
@@ -147,14 +165,15 @@ if st.button("開始回測 🚀"):
     col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
     col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
 
-    # === 交易次數統計 ===
-    st.markdown("## 🟢 交易次數統計")
-    c7, c8 = st.columns(2)
-    c7.metric("買進次數", buy_count)
-    c8.metric("賣出次數", sell_count)
+    # === 新增風控指標 ===
+    st.markdown("## 🧱 風險控制分析")
+    c1, c2 = st.columns(2)
+    c1.metric("最大連續虧損天數", f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天")
+    c2.metric("最長空倉天數", f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天")
 
+    # === 年度交易次數統計 ===
+    st.markdown("## 🟢 交易次數統計")
     if years:
-        st.write("📅 年度交易次數分佈")
         bar_fig = go.Figure()
         bar_fig.add_trace(go.Bar(x=years, y=buy_counts, name="買進次數", marker_color="#27AE60"))
         bar_fig.add_trace(go.Bar(x=years, y=sell_counts, name="賣出次數", marker_color="#E74C3C"))
@@ -208,7 +227,7 @@ if st.button("開始回測 🚀"):
         xaxis_title="月份",
         yaxis_title="年份",
         height=500,
-        title="📊 月度報酬熱力圖 (正報酬綠 / 負報酬紅)",
+        title="📊 月度報酬熱力圖 (綠=正報酬 / 紅=負報酬)",
     )
     st.plotly_chart(heatmap_fig, use_container_width=True)
 
@@ -216,4 +235,4 @@ if st.button("開始回測 🚀"):
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（含年度報酬、月度熱力圖）")
+    st.success("✅ 回測完成！（含年/月報酬圖與風控分析）")
