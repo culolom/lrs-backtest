@@ -1,4 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（含暖機、年/月報酬、風控與穩定性對照）
+# app.py — LRS SMA/EMA 回測系統（整合版報表＋暖機＋穩定性指標）
 
 import os
 import yfinance as yf
@@ -16,7 +16,7 @@ if os.path.exists(font_path):
     fm.fontManager.addfont(font_path)
     matplotlib.rcParams["font.family"] = "Noto Sans TC"
 else:
-    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC"]
+    matplotlib.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "PingFang TC", "Heiti TC"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 # === Streamlit 頁面設定 ===
@@ -36,12 +36,12 @@ col4, col5 = st.columns(2)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 10, 200, 200, 10)
+    window = st.slider("均線天數", 50, 200, 200, 10)
 
-# === 主回測流程 ===
+# === 主程式 ===
 if st.button("開始回測 🚀"):
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
-    with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
+    with st.spinner("資料下載中…（自動暖機一年）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
         if isinstance(df_raw.columns, pd.MultiIndex):
             df_raw.columns = df_raw.columns.get_level_values(0)
@@ -56,7 +56,6 @@ if st.button("開始回測 🚀"):
         if ma_type == "SMA"
         else df["Close"].ewm(span=window, adjust=False).mean()
     )
-
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Position"] = df["Signal"].shift(1).fillna(0)
@@ -71,7 +70,7 @@ if st.button("開始回測 🚀"):
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
 
-    # === 買賣點 ===
+    # === 買賣點偵測 ===
     buy_points, sell_points = [], []
     prev_signal = None
     for i in range(len(df)):
@@ -86,19 +85,16 @@ if st.button("開始回測 🚀"):
             sell_points.append((df.index[i], price))
         prev_signal = signal
 
-    buy_count = len(buy_points)
-    sell_count = len(sell_points)
-
-    # === 績效計算 ===
+    # === 績效 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
-    years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
-    cagr_lrs = (1 + final_return_lrs) ** (1 / years_len) - 1
-    cagr_bh = (1 + final_return_bh) ** (1 / years_len) - 1
+    years = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
+    cagr_lrs = (1 + final_return_lrs) ** (1 / years) - 1
+    cagr_bh = (1 + final_return_bh) ** (1 / years) - 1
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    # === 策略穩定性：LRS & BuyHold 對照 ===
+    # === 穩定性指標 ===
     def calc_metrics(series):
         daily = series.dropna()
         avg = daily.mean()
@@ -111,20 +107,6 @@ if st.button("開始回測 🚀"):
 
     vol_lrs, sharpe_lrs, sortino_lrs = calc_metrics(df["Strategy_Return"])
     vol_bh, sharpe_bh, sortino_bh = calc_metrics(df["Return"])
-
-    # === 風控指標 ===
-    loss_streak = (df["Strategy_Return"] < 0).astype(int)
-    max_consecutive_loss = (
-        loss_streak.groupby(loss_streak.diff().ne(0).cumsum())
-        .transform("size")[loss_streak == 1]
-        .max()
-    )
-    flat_days = (df["Position"] == 0).astype(int)
-    max_flat_days = (
-        flat_days.groupby(flat_days.diff().ne(0).cumsum())
-        .transform("size")[flat_days == 1]
-        .max()
-    )
 
     # === 主圖 ===
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
@@ -151,94 +133,52 @@ if st.button("開始回測 🚀"):
                                  x=0.0, xanchor="left",
                                  font=dict(size=26, color="#2C3E50", family="Noto Sans TC")),
                       legend=dict(orientation="h", y=-0.25),
-                      hovermode="x unified",
-                      margin=dict(l=40, r=40, t=80, b=60))
+                      hovermode="x unified")
     st.plotly_chart(fig, use_container_width=True)
 
-    # === 📄 回測摘要報表 ===
-    st.markdown("## 📄 回測摘要報表")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("LRS 總報酬", f"{final_return_lrs:.2%}")
-    col2.metric("LRS 年化報酬", f"{cagr_lrs:.2%}")
-    col3.metric("LRS 最大回撤", f"{mdd_lrs:.2%}")
+    # === 📊 綜合回測績效報表 ===
+    st.markdown("## 📊 綜合回測績效報表 (LRS vs Buy&Hold)")
 
-    col4, col5, col6 = st.columns(3)
-    col4.metric("Buy&Hold 總報酬", f"{final_return_bh:.2%}")
-    col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
-    col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
+    summary_data = {
+        "指標": ["總報酬", "年化報酬", "最大回撤", "年化波動率", "夏普值", "索提諾值"],
+        "LRS": [f"{final_return_lrs:.2%}", f"{cagr_lrs:.2%}", f"{mdd_lrs:.2%}", f"{vol_lrs:.2%}",
+                f"{sharpe_lrs:.2f}", f"{sortino_lrs:.2f}"],
+        "Buy&Hold": [f"{final_return_bh:.2%}", f"{cagr_bh:.2%}", f"{mdd_bh:.2%}", f"{vol_bh:.2%}",
+                     f"{sharpe_bh:.2f}", f"{sortino_bh:.2f}"]
+    }
 
-    # === 📈 策略穩定性對照 ===
-    st.markdown("## 📈 策略穩定性指標 (LRS vs Buy&Hold)")
-    colA, colB, colC = st.columns(3)
-    colA.markdown("**年化波動率**")
-    colA.metric("LRS", f"{vol_lrs:.2%}")
-    colA.metric("Buy&Hold", f"{vol_bh:.2%}")
+    def compare_metrics(lrs, bh, higher_better=True):
+        try:
+            lrs_val = float(lrs.strip('%'))
+            bh_val = float(bh.strip('%'))
+            return "勝" if (lrs_val > bh_val if higher_better else lrs_val < bh_val) else "敗"
+        except:
+            try:
+                return "勝" if float(lrs) > float(bh) else "敗"
+            except:
+                return "—"
 
-    colB.markdown("**夏普值**")
-    colB.metric("LRS", f"{sharpe_lrs:.2f}")
-    colB.metric("Buy&Hold", f"{sharpe_bh:.2f}")
+    comparison = []
+    for i, k in enumerate(summary_data["指標"]):
+        if k == "最大回撤":
+            comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=False))
+        else:
+            comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=True))
+    summary_data["評比"] = comparison
+    summary_df = pd.DataFrame(summary_data)
 
-    colC.markdown("**索提諾值**")
-    colC.metric("LRS", f"{sortino_lrs:.2f}")
-    colC.metric("Buy&Hold", f"{sortino_bh:.2f}")
-
-    # === 🧱 風險控制 ===
-    st.markdown("## 🧱 風險控制分析")
-    c1, c2 = st.columns(2)
-    c1.metric("最大連續虧損天數", f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天")
-    c2.metric("最長空倉天數", f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天")
-
-    # === 年報酬率 ===
-    st.markdown("## 📈 年度報酬率比較")
-    yearly = df.resample("Y").last()
-    yearly["LRS_Annual_Return"] = yearly["Equity_LRS"].pct_change()
-    yearly["BH_Annual_Return"] = yearly["Equity_BuyHold"].pct_change()
-    if len(yearly) > 1:
-        yr = yearly.index.year
-        line_fig = go.Figure()
-        line_fig.add_trace(go.Scatter(x=yr, y=yearly["LRS_Annual_Return"] * 100,
-                                      mode="lines+markers", name="LRS 年報酬率",
-                                      line=dict(color="#16A085", width=3)))
-        line_fig.add_trace(go.Scatter(x=yr, y=yearly["BH_Annual_Return"] * 100,
-                                      mode="lines+markers", name="Buy&Hold 年報酬率",
-                                      line=dict(color="#7F8C8D", width=3, dash="dot")))
-        line_fig.update_layout(template="plotly_white", xaxis_title="年份",
-                               yaxis_title="年報酬率 (%)", height=400,
-                               legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(line_fig, use_container_width=True)
-
-    # === 月報酬熱力圖 ===
-    st.markdown("## 🔥 月度報酬熱力圖 (LRS 策略)")
-    monthly = df["Strategy_Return"].resample("M").apply(lambda x: (1 + x).prod() - 1)
-    monthly_df = monthly.to_frame("Monthly_Return")
-    monthly_df["Year"] = monthly_df.index.year
-    monthly_df["Month"] = monthly_df.index.month
-    pivot = monthly_df.pivot(index="Year", columns="Month", values="Monthly_Return") * 100
-    pivot = pivot.fillna(0).round(1)
-    heatmap_fig = go.Figure(
-        data=go.Heatmap(
-            z=pivot.values,
-            x=[f"{m}月" for m in pivot.columns],
-            y=pivot.index.astype(str),
-            colorscale="RdYlGn",
-            zmin=-10, zmax=10,
-            text=pivot.round(1).astype(str) + "%",
-            texttemplate="%{text}",
-            showscale=True,
-            colorbar=dict(title="報酬率 (%)")
-        )
+    st.dataframe(
+        summary_df.style.set_table_styles(
+            [{"selector": "thead", "props": [("background-color", "#1e1e1e"), ("color", "white"),
+                                             ("font-weight", "bold"), ("text-align", "center")]}]
+        ).apply(lambda s: ["color: #27AE60" if v == "勝" else "color: #E74C3C" for v in s] if s.name == "評比" else None,
+                axis=0),
+        use_container_width=True,
+        height=320
     )
-    heatmap_fig.update_layout(
-        template="plotly_white",
-        xaxis_title="月份",
-        yaxis_title="年份",
-        height=500,
-        title="📊 月度報酬熱力圖 (綠=正報酬 / 紅=負報酬)",
-    )
-    st.plotly_chart(heatmap_fig, use_container_width=True)
 
     # === 匯出 CSV ===
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（含年/月報酬、穩定性對照與風控分析）")
+    st.success("✅ 回測完成！（綜合報表 + 勝負對比顯示）")
