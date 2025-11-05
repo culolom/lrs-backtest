@@ -242,20 +242,68 @@ if st.button("開始回測 🚀"):
     fig_heat.update_layout(template="plotly_white", height=500, xaxis_title="月份", yaxis_title="年份", title="📊 LRS 策略月度報酬熱力圖")
     st.plotly_chart(fig_heat, use_container_width=True)
 
-    # === 年報酬摘要 ===
-    st.markdown("<h3 style='margin-top:2em;'>🧾 年度報酬摘要表格 (LRS 策略)</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='margin-top:2em; text-align:left;'>🧾 年度報酬摘要表格 (LRS 策略)</h3>", unsafe_allow_html=True)
+    monthly = df["Strategy_Return"].resample("M").apply(lambda x: (1 + x).prod() - 1)
+    monthly_df = monthly.to_frame("Monthly_Return")
+    monthly_df["Year"] = monthly_df.index.year
     year_summary = []
     for year in sorted(monthly_df["Year"].unique()):
         data = monthly_df[monthly_df["Year"] == year]
         annual_ret = (1 + data["Monthly_Return"]).prod() - 1
         monthly_avg = data["Monthly_Return"].mean()
         win_rate = (data["Monthly_Return"] > 0).mean()
-        year_summary.append([year, f"{annual_ret:.2%}", f"{monthly_avg:.2%}", f"{win_rate*100:.0f}%"])
+        year_summary.append([year, annual_ret, monthly_avg, win_rate])
     df_summary = pd.DataFrame(year_summary, columns=["年份", "年報酬率", "月平均報酬", "月勝率"])
-    avg_year = df_summary["年報酬率"].apply(lambda x: float(x.strip("%"))).mean()
-    avg_win = df_summary["月勝率"].apply(lambda x: float(x.strip("%"))).mean()
-    st.table(df_summary)
-    st.markdown(f"**平均年報酬：{avg_year:.1f}%　平均月勝率：{avg_win:.1f}%**")
+    avg_year = df_summary["年報酬率"].mean()
+    avg_win = df_summary["月勝率"].mean()
+
+    st.markdown("""
+    <style>
+    table.report-table {
+      border-collapse: collapse;
+      width: 80%;
+      margin: 20px 0;
+      font-size: 16px;
+      font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+      text-align: center;
+      box-shadow: 0px 0px 6px rgba(0,0,0,0.08);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .report-table th {
+      background-color: #f0f4ff;
+      color: #2c3e50;
+      padding: 12px;
+      border-bottom: 2px solid #ddd;
+    }
+    .report-table td {
+      padding: 10px;
+      border-bottom: 1px solid #eee;
+    }
+    .report-table tr:hover { background-color: #fafafa; }
+    .report-footer {
+      background-color: #eaf2ff;
+      font-weight: bold;
+      text-align: center;
+      color: #2c3e50;
+    }
+    .pos { color: #27ae60; font-weight: 600; }
+    .neg { color: #e74c3c; font-weight: 600; }
+    .win { color: #2980b9; font-weight: 600; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    rows_html = ""
+    for _, row in df_summary.iterrows():
+        color_class = "pos" if row["年報酬率"] > 0 else "neg"
+        rows_html += f"<tr><td>{int(row['年份'])}</td><td class='{color_class}'>{row['年報酬率']:.2%}</td><td>{row['月平均報酬']:.2%}</td><td class='win'>{row['月勝率']*100:.0f}%</td></tr>"
+    html_summary = f"""
+    <table class='report-table'>
+      <thead><tr><th>年份</th><th>年報酬率</th><th>月平均報酬</th><th>月勝率</th></tr></thead>
+      <tbody>{rows_html}<tr class='report-footer'><td>平均</td><td>{avg_year:.2%}</td><td>—</td><td>{avg_win*100:.0f}%</td></tr></tbody>
+    </table>
+    """
+    st.markdown(html_summary, unsafe_allow_html=True)
 
     st.success("✅ 回測完成！")
 
