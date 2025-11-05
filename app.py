@@ -1,13 +1,9 @@
 import matplotlib.font_manager as fm
 import matplotlib
-
 font_path = "NotoSansTC-Bold.otf"
 fm.fontManager.addfont(font_path)
 matplotlib.rcParams["font.family"] = "Noto Sans TC"
 matplotlib.rcParams["axes.unicode_minus"] = False
-
-
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -96,5 +92,6 @@ if st.button("開始分析 🚀"):
     st.write(f"跌破200SMA 次數：{below200_times}")
 
     st.success("✅ 分析完成！")
+
 
 
