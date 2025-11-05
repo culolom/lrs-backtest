@@ -1,100 +1,121 @@
-import matplotlib.font_manager as fm
-import matplotlib
+# app.py — Leverage Rotation Strategy (EMA200版, Streamlit 互動版)
 
-# === 字型設定 ===
-font_path = "./NotoSansTC-Bold.ttf"  # 注意：檔名要完全相同（含大小寫）
-fm.fontManager.addfont(font_path)
-matplotlib.rcParams["font.family"] = "Noto Sans TC"
-matplotlib.rcParams["axes.unicode_minus"] = False
+import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import streamlit as st
+import matplotlib.font_manager as fm
 import matplotlib
 
-# === 中文字型設定 ===
-matplotlib.rcParams['font.sans-serif'] = ['Microsoft JhengHei']
-matplotlib.rcParams['axes.unicode_minus'] = False
+# === 中文字型設定（自動偵測 + 雲端相容） ===
+font_path = "./NotoSansTC-Bold.ttf"
+if os.path.exists(font_path):
+    fm.fontManager.addfont(font_path)
+    matplotlib.rcParams["font.family"] = "Noto Sans TC"
+else:
+    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC"]
+matplotlib.rcParams["axes.unicode_minus"] = False
 
-st.set_page_config(page_title="布林通道缺點事件分析", page_icon="📊", layout="wide")
-st.title("📈 布林通道缺點事件分析")
+# === Streamlit 基本設定 ===
+st.set_page_config(page_title="LRS EMA200 回測系統", page_icon="📈", layout="wide")
+st.title("📊 Leverage Rotation Strategy — EMA200 基本版")
 
-# === 使用者輸入 ===
-symbol = st.text_input("輸入代號（例如 TQQQ, SPY, 00631L.TW）", "TQQQ")
-start = st.date_input("開始日期", pd.to_datetime("2015-01-01"))
-end = st.date_input("結束日期", pd.to_datetime("2025-01-01"))
+# === 使用者輸入區 ===
+col1, col2, col3 = st.columns(3)
+with col1:
+    symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, SPXL, BTC-USD）", "00631L.TW")
+with col2:
+    start = st.date_input("開始日期", pd.to_datetime("2023-01-01"))
+with col3:
+    end = st.date_input("結束日期", pd.to_datetime("2025-01-01"))
 
-if st.button("開始分析 🚀"):
+if st.button("開始回測 🚀"):
     with st.spinner("資料下載中..."):
         df = yf.download(symbol, start=start, end=end)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         st.success(f"✅ 已下載 {len(df)} 筆 {symbol} 歷史資料")
 
-    # === 計算布林通道 ===
-    df['SMA'] = df['Close'].rolling(200).mean()
-    df['STD'] = df['Close'].rolling(200).std()
-    df['Upper'] = df['SMA'] + 2 * df['STD']
-    df['Lower'] = df['SMA'] - 2 * df['STD']
+    # === 計算 EMA200 ===
+    df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
+    df["Signal"] = np.where(df["Close"] > df["EMA200"], 1, 0)
+    df["Return"] = df["Close"].pct_change().fillna(0)
+    df["Strategy_Return"] = df["Return"] * df["Signal"]
+    df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
+    df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    close = df['Close'].to_numpy()
-    upper = df['Upper'].to_numpy()
-    lower = df['Lower'].to_numpy()
+    # === 計算績效指標 ===
+    final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
+    final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
+    years = (df.index[-1] - df.index[0]).days / 365
+    cagr_lrs = (1 + final_return_lrs) ** (1 / years) - 1
+    cagr_bh = (1 + final_return_bh) ** (1 / years) - 1
+    mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
+    mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    df['Above'] = close > upper
-    df['Below'] = close < lower
+    # === 建立買賣點 ===
+    buy_points, sell_points = [], []
+    prev_signal = 0
+    for i in range(len(df)):
+        signal = df["Signal"].iloc[i]
+        price = df["Close"].iloc[i]
+        if signal == 1 and prev_signal == 0:
+            buy_points.append((df.index[i], price))
+        elif signal == 0 and prev_signal == 1:
+            sell_points.append((df.index[i], price))
+        prev_signal = signal
 
-    # === 缺點事件統計 ===
-    def count_defects(signal):
-        count = 0
-        active = False
-        result = []
-        for val in signal:
-            if not active and val:
-                active = True
-                count += 1
-            elif active and not val:
-                active = False
-            result.append(count)
-        return result
+    # === 圖表 ===
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9))
 
-    df['Up_Defect_Count'] = count_defects(df['Above'])
-    df['Down_Defect_Count'] = count_defects(df['Below'])
-    df['Total_Defects'] = df['Up_Defect_Count'] + df['Down_Defect_Count']
+    # (1) 價格走勢 + 買賣點
+    ax1.plot(df.index, df["Close"], label="收盤價", color="blue")
+    ax1.plot(df.index, df["EMA200"], label="EMA200", color="orange")
+    if buy_points:
+        bx, by = zip(*buy_points)
+        ax1.scatter(bx, by, color="green", marker="^", s=80, label="買進（突破EMA200）")
+    if sell_points:
+        sx, sy = zip(*sell_points)
+        ax1.scatter(sx, sy, color="red", marker="x", s=70, label="賣出（跌破EMA200）")
+    ax1.legend()
+    ax1.set_title(f"{symbol} LRS 基本版（EMA200）：突破買進、跌破賣出")
 
-    # === 趨勢結構分析 ===
-    df['SMA200'] = df['Close'].rolling(200).mean()
-    df['Below200'] = df['Close'] < df['SMA200']
-    df['Fatal'] = (df['Up_Defect_Count'] >= 4) | (df['Down_Defect_Count'] >= 4)
+    # (2) 策略績效對比
+    ax2.plot(df.index, df["Equity_LRS"], color="green", label="LRS 策略 (EMA200)")
+    ax2.plot(df.index, df["Equity_BuyHold"], color="grey", linestyle="--", label="Buy & Hold")
+    ax2.legend()
+    ax2.set_title("策略績效曲線對比")
 
-    # === 繪圖 ===
-    fig, ax = plt.subplots(figsize=(14, 7))
-    ax.plot(df.index, df['Close'], label='Close', color='blue')
-    ax.plot(df.index, df['SMA'], label='SMA200', color='orange', alpha=0.8)
-    ax.plot(df.index, df['Upper'], '--', color='grey', alpha=0.6)
-    ax.plot(df.index, df['Lower'], '--', color='grey', alpha=0.6)
-    ax.scatter(df.index[df['Fatal']], df['Close'][df['Fatal']],
-               color='red', marker='x', label='致命缺點 (≥4次)')
-    ax.scatter(df.index[df['Below200']], df['Close'][df['Below200']],
-               color='black', marker='v', label='跌破200SMA')
-    ax.set_title(f"{symbol} 布林通道缺點事件分析")
-    ax.legend()
-    ax.grid(alpha=0.3)
+    text = (
+        f"LRS(EMA200) 總報酬: {final_return_lrs:.2%}\n"
+        f"LRS(EMA200) 年化報酬(CAGR): {cagr_lrs:.2%}\n"
+        f"LRS(EMA200) 最大回撤(MDD): {mdd_lrs:.2%}\n"
+        f"Buy&Hold 總報酬: {final_return_bh:.2%}\n"
+        f"Buy&Hold 年化報酬(CAGR): {cagr_bh:.2%}\n"
+        f"Buy&Hold 最大回撤(MDD): {mdd_bh:.2%}"
+    )
+    ax2.text(df.index[int(len(df) * 0.02)], df["Equity_LRS"].max() * 0.7, text,
+             fontsize=10, bbox=dict(facecolor="white", alpha=0.6))
+    plt.tight_layout()
     st.pyplot(fig)
 
-    # === 統計摘要 ===
-    fatal_times = int(df['Fatal'].sum())
-    below200_times = int(df['Below200'].sum())
+    # === 顯示回測結果 ===
+    st.subheader("📊 回測績效摘要")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("LRS 總報酬", f"{final_return_lrs:.2%}")
+    col2.metric("LRS 年化報酬", f"{cagr_lrs:.2%}")
+    col3.metric("LRS 最大回撤", f"{mdd_lrs:.2%}")
 
-    st.subheader("📊 統計摘要")
-    st.write(f"上漲缺點事件最大次數：{df['Up_Defect_Count'].max()}")
-    st.write(f"下跌缺點事件最大次數：{df['Down_Defect_Count'].max()}")
-    st.write(f"致命缺點（≥4次）出現次數：{fatal_times}")
-    st.write(f"跌破200SMA 次數：{below200_times}")
+    col4, col5, col6 = st.columns(3)
+    col4.metric("Buy&Hold 總報酬", f"{final_return_bh:.2%}")
+    col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
+    col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
 
-    st.success("✅ 分析完成！")
+    # === 匯出結果 CSV ===
+    csv = df.to_csv().encode("utf-8")
+    st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_EMA200.csv", "text/csv")
 
-
-
+    st.success("✅ 回測完成！")
 
