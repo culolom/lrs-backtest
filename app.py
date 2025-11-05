@@ -1,4 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（含暖機、年/月報酬、風控分析、夏普與索提諾）
+# app.py — LRS SMA/EMA 回測系統（含暖機、年/月報酬、風控與穩定性對照）
 
 import os
 import yfinance as yf
@@ -23,7 +23,7 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 st.set_page_config(page_title="LRS 回測系統", page_icon="📈", layout="wide")
 st.title("📊 Leverage Rotation Strategy — SMA / EMA 回測系統")
 
-# === 使用者輸入區 ===
+# === 使用者輸入 ===
 col1, col2, col3 = st.columns(3)
 with col1:
     symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, SPXL, BTC-USD）", "00631L.TW")
@@ -36,7 +36,7 @@ col4, col5 = st.columns(2)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 50, 200, 200, 10)
+    window = st.slider("均線天數", 10, 200, 200, 10)
 
 # === 主回測流程 ===
 if st.button("開始回測 🚀"):
@@ -66,7 +66,7 @@ if st.button("開始回測 🚀"):
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # === 切掉暖機期間 ===
+    # === 切掉暖機區間 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -89,18 +89,6 @@ if st.button("開始回測 🚀"):
     buy_count = len(buy_points)
     sell_count = len(sell_points)
 
-    # === 年度交易統計 ===
-    if buy_points or sell_points:
-        buy_years = [d[0].year for d in buy_points]
-        sell_years = [d[0].year for d in sell_points]
-        buy_series = pd.Series(buy_years).value_counts().sort_index()
-        sell_series = pd.Series(sell_years).value_counts().sort_index()
-        years = sorted(set(buy_series.index) | set(sell_series.index))
-        buy_counts = [buy_series.get(y, 0) for y in years]
-        sell_counts = [sell_series.get(y, 0) for y in years]
-    else:
-        years, buy_counts, sell_counts = [], [], []
-
     # === 績效計算 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
@@ -110,15 +98,19 @@ if st.button("開始回測 🚀"):
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    # === 波動率、夏普、索提諾 ===
-    daily_returns = df["Strategy_Return"].dropna()
-    avg_daily_return = daily_returns.mean()
-    std_daily_return = daily_returns.std()
-    downside_std = daily_returns[daily_returns < 0].std()
+    # === 策略穩定性：LRS & BuyHold 對照 ===
+    def calc_metrics(series):
+        daily = series.dropna()
+        avg = daily.mean()
+        std = daily.std()
+        downside_std = daily[daily < 0].std()
+        vol = std * np.sqrt(252)
+        sharpe = (avg / std) * np.sqrt(252) if std > 0 else np.nan
+        sortino = (avg / downside_std) * np.sqrt(252) if downside_std > 0 else np.nan
+        return vol, sharpe, sortino
 
-    annual_vol = std_daily_return * np.sqrt(252)
-    sharpe = (avg_daily_return / std_daily_return) * np.sqrt(252) if std_daily_return > 0 else np.nan
-    sortino = (avg_daily_return / downside_std) * np.sqrt(252) if downside_std > 0 else np.nan
+    vol_lrs, sharpe_lrs, sortino_lrs = calc_metrics(df["Strategy_Return"])
+    vol_bh, sharpe_bh, sortino_bh = calc_metrics(df["Return"])
 
     # === 風控指標 ===
     loss_streak = (df["Strategy_Return"] < 0).astype(int)
@@ -163,30 +155,40 @@ if st.button("開始回測 🚀"):
                       margin=dict(l=40, r=40, t=80, b=60))
     st.plotly_chart(fig, use_container_width=True)
 
-    # === 回測摘要報表 ===
+    # === 📄 回測摘要報表 ===
     st.markdown("## 📄 回測摘要報表")
     col1, col2, col3 = st.columns(3)
     col1.metric("LRS 總報酬", f"{final_return_lrs:.2%}")
     col2.metric("LRS 年化報酬", f"{cagr_lrs:.2%}")
     col3.metric("LRS 最大回撤", f"{mdd_lrs:.2%}")
+
     col4, col5, col6 = st.columns(3)
     col4.metric("Buy&Hold 總報酬", f"{final_return_bh:.2%}")
     col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
     col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
 
-    st.markdown("## 📈 策略穩定性指標")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("年化波動率", f"{annual_vol:.2%}")
-    c2.metric("夏普值", f"{sharpe:.2f}")
-    c3.metric("索提諾值", f"{sortino:.2f}")
+    # === 📈 策略穩定性對照 ===
+    st.markdown("## 📈 策略穩定性指標 (LRS vs Buy&Hold)")
+    colA, colB, colC = st.columns(3)
+    colA.markdown("**年化波動率**")
+    colA.metric("LRS", f"{vol_lrs:.2%}")
+    colA.metric("Buy&Hold", f"{vol_bh:.2%}")
 
-    # === 風控指標 ===
+    colB.markdown("**夏普值**")
+    colB.metric("LRS", f"{sharpe_lrs:.2f}")
+    colB.metric("Buy&Hold", f"{sharpe_bh:.2f}")
+
+    colC.markdown("**索提諾值**")
+    colC.metric("LRS", f"{sortino_lrs:.2f}")
+    colC.metric("Buy&Hold", f"{sortino_bh:.2f}")
+
+    # === 🧱 風險控制 ===
     st.markdown("## 🧱 風險控制分析")
-    c4, c5 = st.columns(2)
-    c4.metric("最大連續虧損天數", f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天")
-    c5.metric("最長空倉天數", f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天")
+    c1, c2 = st.columns(2)
+    c1.metric("最大連續虧損天數", f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天")
+    c2.metric("最長空倉天數", f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天")
 
-    # === 年度報酬率 ===
+    # === 年報酬率 ===
     st.markdown("## 📈 年度報酬率比較")
     yearly = df.resample("Y").last()
     yearly["LRS_Annual_Return"] = yearly["Equity_LRS"].pct_change()
@@ -205,7 +207,7 @@ if st.button("開始回測 🚀"):
                                legend=dict(orientation="h", y=1.1))
         st.plotly_chart(line_fig, use_container_width=True)
 
-    # === 月度報酬熱力圖 ===
+    # === 月報酬熱力圖 ===
     st.markdown("## 🔥 月度報酬熱力圖 (LRS 策略)")
     monthly = df["Strategy_Return"].resample("M").apply(lambda x: (1 + x).prod() - 1)
     monthly_df = monthly.to_frame("Monthly_Return")
@@ -239,4 +241,4 @@ if st.button("開始回測 🚀"):
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（含年/月報酬、波動率、夏普與索提諾分析）")
+    st.success("✅ 回測完成！（含年/月報酬、穩定性對照與風控分析）")
