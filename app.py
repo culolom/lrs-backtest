@@ -1,4 +1,4 @@
-# app.py — LRS (SMA/EMA + Plotly + 修正版策略報酬 + 自動暖機一年)
+# app.py — LRS (SMA/EMA + Plotly + 修正版策略報酬 + 暖機一年 + 報酬歸一化)
 
 import os
 import yfinance as yf
@@ -41,10 +41,11 @@ col4, col5 = st.columns(2)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 10, 200, 200, 10)
+    window = st.slider("均線天數", 50, 200, 200, 10)
 
 # === 回測主流程 ===
 if st.button("開始回測 🚀"):
+    # 自動提前一年抓資料（暖機）
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
@@ -66,14 +67,16 @@ if st.button("開始回測 🚀"):
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
 
-    # === ✅ 修正版策略報酬算法（使用前一日持倉狀態） ===
+    # === ✅ 修正版策略報酬算法 ===
     df["Position"] = df["Signal"].shift(1).fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # === 切除暖機資料 ===
-    df = df.loc[pd.to_datetime(start): pd.to_datetime(end)]
+    # === 切掉暖機區間，並重設報酬基準 ===
+    df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
+    df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
+    df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
 
     # === 建立買賣點 ===
     buy_points, sell_points = [], []
@@ -166,4 +169,4 @@ if st.button("開始回測 🚀"):
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（已修正報酬算法，並自動抓取前一年暖機資料）")
+    st.success("✅ 回測完成！（報酬計算已修正並重設基準）")
