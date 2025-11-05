@@ -1,5 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（整合報表版）
-
+# app.py — LRS SMA/EMA 回測系統（專業完整版）
 import os
 import yfinance as yf
 import pandas as pd
@@ -16,12 +15,12 @@ if os.path.exists(font_path):
     fm.fontManager.addfont(font_path)
     matplotlib.rcParams["font.family"] = "Noto Sans TC"
 else:
-    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC"]
+    matplotlib.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "PingFang TC", "Heiti TC"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 # === Streamlit 頁面設定 ===
 st.set_page_config(page_title="LRS 回測系統", page_icon="📈", layout="wide")
-st.title("📊 Leverage Rotation Strategy — SMA / EMA 回測系統")
+st.markdown("<h1 style='margin-bottom:0.5em;'>📊 Leverage Rotation Strategy — SMA / EMA 回測系統</h1>", unsafe_allow_html=True)
 
 # === 使用者輸入 ===
 col1, col2, col3 = st.columns(3)
@@ -56,17 +55,13 @@ if st.button("開始回測 🚀"):
         if ma_type == "SMA"
         else df["Close"].ewm(span=window, adjust=False).mean()
     )
-
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Position"] = df["Signal"].shift(1).fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
 
-    # === 累積報酬 ===
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
-
-    # === 切掉暖機區間 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -95,7 +90,6 @@ if st.button("開始回測 🚀"):
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    # === 策略穩定性：LRS & BuyHold 對照 ===
     def calc_metrics(series):
         daily = series.dropna()
         avg = daily.mean()
@@ -109,33 +103,28 @@ if st.button("開始回測 🚀"):
     vol_lrs, sharpe_lrs, sortino_lrs = calc_metrics(df["Strategy_Return"])
     vol_bh, sharpe_bh, sortino_bh = calc_metrics(df["Return"])
 
-    # === 📊 綜合回測績效報表 ===
-    st.markdown("## 📊 綜合回測績效報表 (LRS vs Buy&Hold)")
+    # === 風控 ===
+    loss_streak = (df["Strategy_Return"] < 0).astype(int)
+    max_consecutive_loss = loss_streak.groupby(loss_streak.diff().ne(0).cumsum()).transform("size")[loss_streak == 1].max()
+    flat_days = (df["Position"] == 0).astype(int)
+    max_flat_days = flat_days.groupby(flat_days.diff().ne(0).cumsum()).transform("size")[flat_days == 1].max()
 
+    # === 綜合報表 ===
+    st.markdown("<h2 style='margin-top:1.5em;'>📊 綜合回測績效報表</h2>", unsafe_allow_html=True)
     summary_data = {
         "指標": [
-            "總報酬",
-            "年化報酬",
-            "最大回撤",
-            "年化波動率",
-            "夏普值",
-            "索提諾值"
+            "總報酬", "年化報酬", "最大回撤", "年化波動率",
+            "夏普值", "索提諾值", "最大連續虧損天數", "最長空倉天數"
         ],
         "LRS": [
-            f"{final_return_lrs:.2%}",
-            f"{cagr_lrs:.2%}",
-            f"{mdd_lrs:.2%}",
-            f"{vol_lrs:.2%}",
-            f"{sharpe_lrs:.2f}",
-            f"{sortino_lrs:.2f}"
+            f"{final_return_lrs:.2%}", f"{cagr_lrs:.2%}", f"{mdd_lrs:.2%}",
+            f"{vol_lrs:.2%}", f"{sharpe_lrs:.2f}", f"{sortino_lrs:.2f}",
+            f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天",
+            f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天"
         ],
         "Buy&Hold": [
-            f"{final_return_bh:.2%}",
-            f"{cagr_bh:.2%}",
-            f"{mdd_bh:.2%}",
-            f"{vol_bh:.2%}",
-            f"{sharpe_bh:.2f}",
-            f"{sortino_bh:.2f}"
+            f"{final_return_bh:.2%}", f"{cagr_bh:.2%}", f"{mdd_bh:.2%}",
+            f"{vol_bh:.2%}", f"{sharpe_bh:.2f}", f"{sortino_bh:.2f}", "—", "—"
         ]
     }
 
@@ -143,46 +132,99 @@ if st.button("開始回測 🚀"):
         try:
             lrs_val = float(lrs.strip('%'))
             bh_val = float(bh.strip('%'))
-            return "勝" if (lrs_val > bh_val if higher_better else lrs_val < bh_val) else "敗"
+            return "🏆" if (lrs_val > bh_val if higher_better else lrs_val < bh_val) else "—"
         except:
-            try:
-                return "勝" if float(lrs) > float(bh) else "敗"
-            except:
-                return "—"
+            return "—"
 
     comparison = []
     for i, k in enumerate(summary_data["指標"]):
         if k in ["最大回撤"]:
             comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=False))
+        elif k in ["最大連續虧損天數", "最長空倉天數"]:
+            comparison.append("—")
         else:
             comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=True))
     summary_data["評比"] = comparison
 
     summary_df = pd.DataFrame(summary_data)
-    st.table(summary_df)
+    st.markdown("""
+        <style>
+        table {width:100%;border-collapse:collapse;margin-top:15px;}
+        thead th {
+            background-color:#f3f4f6;color:#333;font-weight:700;
+            text-align:center;padding:10px;border-bottom:2px solid #ddd;
+        }
+        tbody td {
+            text-align:center;padding:10px;border-bottom:1px solid #eee;
+            font-size:16px;
+        }
+        tbody td:first-child {font-weight:700;text-align:left;color:#2C3E50;}
+        </style>
+    """, unsafe_allow_html=True)
+    st.markdown(summary_df.to_html(index=False, escape=False), unsafe_allow_html=True)
 
-    # === 📈 主圖 ===
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
-                        vertical_spacing=0.1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines",
-                             name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA"], mode="lines",
-                             name=f"{ma_type}{window}", line=dict(color="#F39C12", width=2)), row=1, col=1)
+    # === 📈 買賣點視覺化 ===
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"), vertical_spacing=0.1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA"], mode="lines", name=f"{ma_type}{window}", line=dict(color="#F39C12", width=2)), row=1, col=1)
     if buy_points:
         bx, by = zip(*buy_points)
-        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進",
-                                 marker=dict(color="#27AE60", size=9, symbol="triangle-up")), row=1, col=1)
+        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進", marker=dict(color="#27AE60", size=9, symbol="triangle-up")), row=1, col=1)
     if sell_points:
         sx, sy = zip(*sell_points)
-        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出",
-                                 marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], mode="lines",
-                             name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], mode="lines",
-                             name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
-    fig.update_layout(height=700, template="plotly_white",
-                      title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測", x=0.0, xanchor="left", font=dict(size=26)))
+        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出", marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], mode="lines", name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], mode="lines", name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
+    fig.update_layout(height=700, template="plotly_white", title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測結果", x=0.0, font=dict(size=26)))
     st.plotly_chart(fig, use_container_width=True)
+
+    # === 📆 年度報酬折線圖 ===
+    st.markdown("<h3 style='margin-top:2em;'>📆 年度報酬率比較</h3>", unsafe_allow_html=True)
+    yearly = df.resample("Y").last()
+    yearly["LRS_Annual_Return"] = yearly["Equity_LRS"].pct_change()
+    yearly["BH_Annual_Return"] = yearly["Equity_BuyHold"].pct_change()
+    if len(yearly) > 1:
+        yr = yearly.index.year
+        fig_line = go.Figure()
+        fig_line.add_trace(go.Scatter(x=yr, y=yearly["LRS_Annual_Return"] * 100, mode="lines+markers", name="LRS 年報酬率", line=dict(color="#16A085", width=3)))
+        fig_line.add_trace(go.Scatter(x=yr, y=yearly["BH_Annual_Return"] * 100, mode="lines+markers", name="Buy&Hold 年報酬率", line=dict(color="#7F8C8D", width=3, dash="dot")))
+        fig_line.update_layout(template="plotly_white", height=400, xaxis_title="年份", yaxis_title="報酬率 (%)", legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_line, use_container_width=True)
+
+    # === 🔥 月度報酬熱力圖 ===
+    st.markdown("<h3 style='margin-top:2em;'>🔥 月度報酬熱力圖 (LRS 策略)</h3>", unsafe_allow_html=True)
+    monthly = df["Strategy_Return"].resample("M").apply(lambda x: (1 + x).prod() - 1)
+    monthly_df = monthly.to_frame("Monthly_Return")
+    monthly_df["Year"] = monthly_df.index.year
+    monthly_df["Month"] = monthly_df.index.month
+    pivot = monthly_df.pivot(index="Year", columns="Month", values="Monthly_Return") * 100
+    pivot = pivot.fillna(0).round(1)
+    fig_heat = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=[f"{m}月" for m in pivot.columns],
+        y=pivot.index.astype(str),
+        colorscale="RdYlGn",
+        zmin=-10, zmax=10,
+        text=pivot.round(1).astype(str) + "%",
+        texttemplate="%{text}",
+        colorbar=dict(title="報酬率 (%)")
+    ))
+    fig_heat.update_layout(template="plotly_white", height=500, xaxis_title="月份", yaxis_title="年份", title="📊 LRS 策略月度報酬熱力圖")
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # === 🧾 年度報酬摘要表格 ===
+    st.markdown("<h3 style='margin-top:2em;'>🧾 年度報酬摘要表格 (LRS 策略)</h3>", unsafe_allow_html=True)
+    year_summary = []
+    for year in sorted(monthly_df["Year"].unique()):
+        data = monthly_df[monthly_df["Year"] == year]
+        annual_ret = (1 + data["Monthly_Return"]).prod() - 1
+        monthly_avg = data["Monthly_Return"].mean()
+        win_rate = (data["Monthly_Return"] > 0).mean()
+        year_summary.append([year, f"{annual_ret:.2%}", f"{monthly_avg:.2%}", f"{win_rate*100:.0f}%"])
+    df_summary = pd.DataFrame(year_summary, columns=["年份", "年報酬率", "月平均報酬", "月勝率"])
+    avg_year = df_summary["年報酬率"].apply(lambda x: float(x.strip("%"))).mean()
+    avg_win = df_summary["月勝率"].apply(lambda x: float(x.strip("%"))).mean()
+    st.table(df_summary)
+    st.markdown(f"**平均年報酬：{avg_year:.1f}%　平均月勝率：{avg_win:.1f}%**")
 
     st.success("✅ 回測完成！")
