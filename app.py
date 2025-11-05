@@ -1,4 +1,4 @@
-# app.py — LRS (SMA/EMA + 暖機一年 + 年度交易次數 + 年度報酬率 + H2 標題美化)
+# app.py — LRS (含 SMA/EMA、年度報酬、月度熱力圖、交易統計)
 
 import os
 import yfinance as yf
@@ -10,7 +10,7 @@ import matplotlib
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-# === 中文字型設定 ===
+# === 字型設定 ===
 font_path = "./NotoSansTC-Bold.ttf"
 if os.path.exists(font_path):
     fm.fontManager.addfont(font_path)
@@ -19,7 +19,7 @@ else:
     matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# === Streamlit 基本設定 ===
+# === Streamlit 設定 ===
 st.set_page_config(page_title="LRS 移動平均回測系統", page_icon="📈", layout="wide")
 st.title("📊 Leverage Rotation Strategy — SMA / EMA 回測系統")
 
@@ -38,7 +38,7 @@ with col4:
 with col5:
     window = st.slider("均線天數", 50, 200, 200, 10)
 
-# === 主流程 ===
+# === 主程式 ===
 if st.button("開始回測 🚀"):
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
@@ -51,11 +51,10 @@ if st.button("開始回測 🚀"):
         st.stop()
 
     df = df_raw.copy()
-    df["MA"] = (
-        df["Close"].rolling(window=window).mean()
-        if ma_type == "SMA"
-        else df["Close"].ewm(span=window, adjust=False).mean()
-    )
+    if ma_type == "SMA":
+        df["MA"] = df["Close"].rolling(window=window).mean()
+    else:
+        df["MA"] = df["Close"].ewm(span=window, adjust=False).mean()
 
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
@@ -64,6 +63,7 @@ if st.button("開始回測 🚀"):
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
+    # 切掉暖機區間
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -98,7 +98,7 @@ if st.button("開始回測 🚀"):
     else:
         years, buy_counts, sell_counts = [], [], []
 
-    # === 績效計算 ===
+    # === 績效指標 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
@@ -111,7 +111,6 @@ if st.button("開始回測 🚀"):
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
                         vertical_spacing=0.1)
-
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines",
                              name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["MA"], mode="lines",
@@ -124,22 +123,17 @@ if st.button("開始回測 🚀"):
         sx, sy = zip(*sell_points)
         fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出",
                                  marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
-
     fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], mode="lines",
                              name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], mode="lines",
                              name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
-
-    fig.update_layout(
-        height=700,
-        template="plotly_white",
-        title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測",
-                   x=0.0, xanchor="left",
-                   font=dict(size=26, color="#2C3E50", family="Noto Sans TC")),
-        legend=dict(orientation="h", y=-0.25),
-        hovermode="x unified",
-        margin=dict(l=40, r=40, t=80, b=60),
-    )
+    fig.update_layout(height=700, template="plotly_white",
+                      title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測",
+                                 x=0.0, xanchor="left",
+                                 font=dict(size=26, color="#2C3E50", family="Noto Sans TC")),
+                      legend=dict(orientation="h", y=-0.25),
+                      hovermode="x unified",
+                      margin=dict(l=40, r=40, t=80, b=60))
     st.plotly_chart(fig, use_container_width=True)
 
     # === 回測摘要報表 ===
@@ -169,12 +163,11 @@ if st.button("開始回測 🚀"):
                               legend=dict(orientation="h", y=1.1))
         st.plotly_chart(bar_fig, use_container_width=True)
 
-    # === 年度報酬率圖 ===
+    # === 年度報酬率 ===
     st.markdown("## 📈 年度報酬率比較")
     yearly = df.resample("Y").last()
     yearly["LRS_Annual_Return"] = yearly["Equity_LRS"].pct_change()
     yearly["BH_Annual_Return"] = yearly["Equity_BuyHold"].pct_change()
-
     if len(yearly) > 1:
         yr = yearly.index.year
         line_fig = go.Figure()
@@ -189,8 +182,38 @@ if st.button("開始回測 🚀"):
                                legend=dict(orientation="h", y=1.1))
         st.plotly_chart(line_fig, use_container_width=True)
 
+    # === 月度報酬熱力圖 ===
+    st.markdown("## 🔥 月度報酬熱力圖 (LRS 策略)")
+    monthly = df["Strategy_Return"].resample("M").apply(lambda x: (1 + x).prod() - 1)
+    monthly_df = monthly.to_frame("Monthly_Return")
+    monthly_df["Year"] = monthly_df.index.year
+    monthly_df["Month"] = monthly_df.index.month
+    pivot = monthly_df.pivot(index="Year", columns="Month", values="Monthly_Return") * 100
+    pivot = pivot.fillna(0).round(1)
+    heatmap_fig = go.Figure(
+        data=go.Heatmap(
+            z=pivot.values,
+            x=[f"{m}月" for m in pivot.columns],
+            y=pivot.index.astype(str),
+            colorscale="RdYlGn",
+            zmin=-10, zmax=10,
+            text=pivot.round(1).astype(str) + "%",
+            texttemplate="%{text}",
+            showscale=True,
+            colorbar=dict(title="報酬率 (%)")
+        )
+    )
+    heatmap_fig.update_layout(
+        template="plotly_white",
+        xaxis_title="月份",
+        yaxis_title="年份",
+        height=500,
+        title="📊 月度報酬熱力圖 (正報酬綠 / 負報酬紅)",
+    )
+    st.plotly_chart(heatmap_fig, use_container_width=True)
+
     # === 匯出 CSV ===
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（含年度交易次數 + 年報酬率分析）")
+    st.success("✅ 回測完成！（含年度報酬、月度熱力圖）")
