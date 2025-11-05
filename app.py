@@ -1,4 +1,4 @@
-# app.py — LRS (SMA/EMA + Plotly + 修正版策略報酬 + 暖機一年 + 報酬歸一化 + 年度交易次數圖)
+# app.py — LRS (SMA/EMA + Plotly + 暖機一年 + 年度交易次數 + H2 標題美化)
 
 import os
 import yfinance as yf
@@ -108,7 +108,7 @@ if st.button("開始回測 🚀"):
     else:
         years, buy_counts, sell_counts = [], [], []
 
-    # === 計算績效指標 ===
+    # === 績效計算 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
@@ -117,7 +117,7 @@ if st.button("開始回測 🚀"):
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    # === Plotly 主圖 ===
+    # === 主圖 ===
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
@@ -125,13 +125,10 @@ if st.button("開始回測 🚀"):
     )
 
     # (1) 價格走勢
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["Close"], mode="lines",
-        name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["MA"], mode="lines",
-        name=f"{ma_type}{window}", line=dict(color="#F39C12", width=2)), row=1, col=1)
-
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="收盤價",
+                             line=dict(color="#2E86AB", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA"], mode="lines", name=f"{ma_type}{window}",
+                             line=dict(color="#F39C12", width=2)), row=1, col=1)
     if buy_points:
         bx, by = zip(*buy_points)
         fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進",
@@ -142,25 +139,29 @@ if st.button("開始回測 🚀"):
                                  marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
 
     # (2) 淨值走勢
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["Equity_LRS"], mode="lines",
-        name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["Equity_BuyHold"], mode="lines",
-        name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], mode="lines",
+                             name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], mode="lines",
+                             name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
 
+    # === 改良後標題樣式（靠左 + H2 大字體） ===
     fig.update_layout(
         height=700,
         template="plotly_white",
-        title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測（自動暖機一年）", x=0.5, font=dict(size=20)),
+        title=dict(
+            text=f"📈 {symbol} — {ma_type}{window} 回測",
+            x=0.0,
+            xanchor="left",
+            font=dict(size=26, color="#2C3E50", family="Noto Sans TC"),
+        ),
         legend=dict(orientation="h", y=-0.25),
         hovermode="x unified",
         margin=dict(l=40, r=40, t=80, b=60),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # === 總體績效 ===
-    st.subheader("📊 回測績效摘要")
+    # === 回測摘要報表 ===
+    st.markdown("## 📄 回測摘要報表")
     col1, col2, col3 = st.columns(3)
     col1.metric("LRS 總報酬", f"{final_return_lrs:.2%}")
     col2.metric("LRS 年化報酬", f"{cagr_lrs:.2%}")
@@ -171,8 +172,8 @@ if st.button("開始回測 🚀"):
     col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
     col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
 
-    # === 買賣次數統計 ===
-    st.subheader("🟢 交易次數統計")
+    # === 交易次數統計 ===
+    st.markdown("## 🟢 交易次數統計")
     c7, c8 = st.columns(2)
     c7.metric("買進次數", buy_count)
     c8.metric("賣出次數", sell_count)
@@ -197,4 +198,4 @@ if st.button("開始回測 🚀"):
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（含年度交易次數分析）")
+    st.success("✅ 回測完成！（含年度交易次數分析與 H2 標題樣式）")
