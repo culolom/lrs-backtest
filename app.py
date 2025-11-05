@@ -1,4 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（含暖機、年/月報酬圖、風控指標）
+# app.py — LRS SMA/EMA 回測系統（含暖機、年/月報酬、風控分析、夏普與索提諾）
 
 import os
 import yfinance as yf
@@ -110,6 +110,16 @@ if st.button("開始回測 🚀"):
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
+    # === 波動率、夏普、索提諾 ===
+    daily_returns = df["Strategy_Return"].dropna()
+    avg_daily_return = daily_returns.mean()
+    std_daily_return = daily_returns.std()
+    downside_std = daily_returns[daily_returns < 0].std()
+
+    annual_vol = std_daily_return * np.sqrt(252)
+    sharpe = (avg_daily_return / std_daily_return) * np.sqrt(252) if std_daily_return > 0 else np.nan
+    sortino = (avg_daily_return / downside_std) * np.sqrt(252) if downside_std > 0 else np.nan
+
     # === 風控指標 ===
     loss_streak = (df["Strategy_Return"] < 0).astype(int)
     max_consecutive_loss = (
@@ -117,7 +127,6 @@ if st.button("開始回測 🚀"):
         .transform("size")[loss_streak == 1]
         .max()
     )
-
     flat_days = (df["Position"] == 0).astype(int)
     max_flat_days = (
         flat_days.groupby(flat_days.diff().ne(0).cumsum())
@@ -165,22 +174,17 @@ if st.button("開始回測 🚀"):
     col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
     col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
 
-    # === 新增風控指標 ===
-    st.markdown("## 🧱 風險控制分析")
-    c1, c2 = st.columns(2)
-    c1.metric("最大連續虧損天數", f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天")
-    c2.metric("最長空倉天數", f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天")
+    st.markdown("## 📈 策略穩定性指標")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("年化波動率", f"{annual_vol:.2%}")
+    c2.metric("夏普值", f"{sharpe:.2f}")
+    c3.metric("索提諾值", f"{sortino:.2f}")
 
-    # === 年度交易次數統計 ===
-    st.markdown("## 🟢 交易次數統計")
-    if years:
-        bar_fig = go.Figure()
-        bar_fig.add_trace(go.Bar(x=years, y=buy_counts, name="買進次數", marker_color="#27AE60"))
-        bar_fig.add_trace(go.Bar(x=years, y=sell_counts, name="賣出次數", marker_color="#E74C3C"))
-        bar_fig.update_layout(barmode="group", template="plotly_white",
-                              xaxis_title="年份", yaxis_title="次數", height=400,
-                              legend=dict(orientation="h", y=1.1))
-        st.plotly_chart(bar_fig, use_container_width=True)
+    # === 風控指標 ===
+    st.markdown("## 🧱 風險控制分析")
+    c4, c5 = st.columns(2)
+    c4.metric("最大連續虧損天數", f"{int(max_consecutive_loss) if pd.notna(max_consecutive_loss) else 0} 天")
+    c5.metric("最長空倉天數", f"{int(max_flat_days) if pd.notna(max_flat_days) else 0} 天")
 
     # === 年度報酬率 ===
     st.markdown("## 📈 年度報酬率比較")
@@ -235,4 +239,4 @@ if st.button("開始回測 🚀"):
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（含年/月報酬圖與風控分析）")
+    st.success("✅ 回測完成！（含年/月報酬、波動率、夏普與索提諾分析）")
