@@ -1,13 +1,14 @@
-# app.py — Leverage Rotation Strategy (SMA200版, Streamlit 互動版)
+# app.py — Leverage Rotation Strategy (SMA/EMA 互動回測版 + Plotly)
 
 import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import streamlit as st
 import matplotlib.font_manager as fm
 import matplotlib
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # === 中文字型設定（自動偵測 + 雲端相容） ===
 font_path = "./NotoSansTC-Bold.ttf"
@@ -24,8 +25,8 @@ else:
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 # === Streamlit 基本設定 ===
-st.set_page_config(page_title="LRS SMA200 回測系統", page_icon="📈", layout="wide")
-st.title("📊 Leverage Rotation Strategy — SMA200 基本版")
+st.set_page_config(page_title="LRS 移動平均回測系統", page_icon="📈", layout="wide")
+st.title("📊 Leverage Rotation Strategy — SMA / EMA 回測系統")
 
 # === 使用者輸入區 ===
 col1, col2, col3 = st.columns(3)
@@ -36,6 +37,13 @@ with col2:
 with col3:
     end = st.date_input("結束日期", pd.to_datetime("2025-01-01"))
 
+col4, col5 = st.columns(2)
+with col4:
+    ma_type = st.selectbox("選擇均線種類", ["SMA", "EMA"])
+with col5:
+    window = st.slider("均線天數", 50, 300, 200, 10)
+
+# === 按下按鈕後回測 ===
 if st.button("開始回測 🚀"):
     with st.spinner("資料下載中..."):
         df = yf.download(symbol, start=start, end=end)
@@ -43,11 +51,14 @@ if st.button("開始回測 🚀"):
             df.columns = df.columns.get_level_values(0)
         st.success(f"✅ 已下載 {len(df)} 筆 {symbol} 歷史資料")
 
-    # === 計算 SMA200 ===
-    df["SMA200"] = df["Close"].rolling(window=200).mean()
-    df["Signal"] = np.where(df["Close"] > df["SMA200"], 1, 0)
+    # === 計算移動平均線 ===
+    if ma_type == "SMA":
+        df["MA"] = df["Close"].rolling(window=window).mean()
+    else:
+        df["MA"] = df["Close"].ewm(span=window, adjust=False).mean()
 
-    # === 計算每日報酬與策略報酬 ===
+    # === 建立訊號與績效 ===
+    df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Signal"]
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
@@ -74,39 +85,52 @@ if st.button("開始回測 🚀"):
             sell_points.append((df.index[i], price))
         prev_signal = signal
 
-    # === 圖表 ===
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9))
+    # === Plotly 互動圖 ===
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
+        vertical_spacing=0.1,
+    )
 
-    # (1) 價格走勢 + 買賣點
-    ax1.plot(df.index, df["Close"], label="收盤價", color="blue")
-    ax1.plot(df.index, df["SMA200"], label="SMA200", color="orange")
+    # --- 價格走勢 + 買賣點 ---
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["Close"], mode="lines",
+        name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["MA"], mode="lines",
+        name=f"{ma_type}{window}", line=dict(color="#F39C12", width=2)), row=1, col=1)
+
     if buy_points:
         bx, by = zip(*buy_points)
-        ax1.scatter(bx, by, color="green", marker="^", s=80, label="買進（突破SMA200）")
+        fig.add_trace(go.Scatter(
+            x=bx, y=by, mode="markers", name="買進",
+            marker=dict(color="#27AE60", size=9, symbol="triangle-up")), row=1, col=1)
     if sell_points:
         sx, sy = zip(*sell_points)
-        ax1.scatter(sx, sy, color="red", marker="x", s=70, label="賣出（跌破SMA200）")
-    ax1.legend()
-    ax1.set_title(f"{symbol} LRS 基本版（SMA200）：突破買進、跌破賣出")
+        fig.add_trace(go.Scatter(
+            x=sx, y=sy, mode="markers", name="賣出",
+            marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
 
-    # (2) 策略績效對比
-    ax2.plot(df.index, df["Equity_LRS"], color="green", label="LRS 策略 (SMA200)")
-    ax2.plot(df.index, df["Equity_BuyHold"], color="grey", linestyle="--", label="Buy & Hold")
-    ax2.legend()
-    ax2.set_title("策略績效曲線對比")
+    # --- 策略績效對比 ---
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["Equity_LRS"], mode="lines",
+        name=f"LRS 策略 ({ma_type}{window})",
+        line=dict(color="#16A085", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["Equity_BuyHold"], mode="lines",
+        name="Buy & Hold",
+        line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
 
-    text = (
-        f"LRS(SMA200) 總報酬: {final_return_lrs:.2%}\n"
-        f"LRS(SMA200) 年化報酬(CAGR): {cagr_lrs:.2%}\n"
-        f"LRS(SMA200) 最大回撤(MDD): {mdd_lrs:.2%}\n"
-        f"Buy&Hold 總報酬: {final_return_bh:.2%}\n"
-        f"Buy&Hold 年化報酬(CAGR): {cagr_bh:.2%}\n"
-        f"Buy&Hold 最大回撤(MDD): {mdd_bh:.2%}"
+    # --- Layout 美化 ---
+    fig.update_layout(
+        height=700,
+        template="plotly_white",
+        title=dict(text=f"📈 {symbol} — {ma_type}{window} 移動平均策略回測", x=0.5, font=dict(size=20)),
+        legend=dict(orientation="h", y=-0.2),
+        hovermode="x unified",
+        margin=dict(l=40, r=40, t=80, b=60),
     )
-    ax2.text(df.index[int(len(df) * 0.02)], df["Equity_LRS"].max() * 0.7, text,
-             fontsize=10, bbox=dict(facecolor="white", alpha=0.6))
-    plt.tight_layout()
-    st.pyplot(fig)
+    st.plotly_chart(fig, use_container_width=True)
 
     # === 顯示回測結果 ===
     st.subheader("📊 回測績效摘要")
@@ -122,6 +146,6 @@ if st.button("開始回測 🚀"):
 
     # === 匯出結果 CSV ===
     csv = df.to_csv().encode("utf-8")
-    st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_SMA200.csv", "text/csv")
+    st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！")
+    st.success(f"✅ 回測完成！（{ma_type}{window}）")
