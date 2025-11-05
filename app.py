@@ -1,4 +1,4 @@
-# app.py — LRS (SMA/EMA + Plotly + 買賣次數 + 預設一年暖機)
+# app.py — LRS (SMA/EMA + Plotly + 修正版策略報酬 + 自動暖機一年)
 
 import os
 import yfinance as yf
@@ -41,13 +41,11 @@ col4, col5 = st.columns(2)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 5, 200, 200, 10)
+    window = st.slider("均線天數", 10, 200, 200, 10)
 
-# === 按下按鈕後回測 ===
+# === 回測主流程 ===
 if st.button("開始回測 🚀"):
-    # 自動提前一年抓資料（365 天暖機）
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
-
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
         if isinstance(df_raw.columns, pd.MultiIndex):
@@ -64,24 +62,18 @@ if st.button("開始回測 🚀"):
     else:
         df["MA"] = df["Close"].ewm(span=window, adjust=False).mean()
 
-    # === 建立訊號與績效 ===
+    # === 建立交易訊號 ===
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
-    df["Strategy_Return"] = df["Return"] * df["Signal"]
+
+    # === ✅ 修正版策略報酬算法（使用前一日持倉狀態） ===
+    df["Position"] = df["Signal"].shift(1).fillna(0)
+    df["Strategy_Return"] = df["Return"] * df["Position"]
     df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # === 裁掉暖機期，只顯示設定的開始日期後的部分 ===
+    # === 切除暖機資料 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)]
-
-    # === 計算績效指標 ===
-    final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
-    final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
-    years = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
-    cagr_lrs = (1 + final_return_lrs) ** (1 / years) - 1
-    cagr_bh = (1 + final_return_bh) ** (1 / years) - 1
-    mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
-    mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
     # === 建立買賣點 ===
     buy_points, sell_points = [], []
@@ -101,6 +93,15 @@ if st.button("開始回測 🚀"):
     buy_count = len(buy_points)
     sell_count = len(sell_points)
 
+    # === 計算績效指標 ===
+    final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
+    final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
+    years = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
+    cagr_lrs = (1 + final_return_lrs) ** (1 / years) - 1
+    cagr_bh = (1 + final_return_bh) ** (1 / years) - 1
+    mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
+    mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
+
     # === Plotly 圖表 ===
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
@@ -108,6 +109,7 @@ if st.button("開始回測 🚀"):
         vertical_spacing=0.1,
     )
 
+    # (1) 價格走勢
     fig.add_trace(go.Scatter(
         x=df.index, y=df["Close"], mode="lines",
         name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
@@ -124,14 +126,13 @@ if st.button("開始回測 🚀"):
         fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出",
                                  marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
 
+    # (2) 淨值走勢
     fig.add_trace(go.Scatter(
         x=df.index, y=df["Equity_LRS"], mode="lines",
-        name=f"LRS 策略 ({ma_type}{window})",
-        line=dict(color="#16A085", width=2)), row=2, col=1)
+        name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
     fig.add_trace(go.Scatter(
         x=df.index, y=df["Equity_BuyHold"], mode="lines",
-        name="Buy & Hold",
-        line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
+        name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
 
     fig.update_layout(
         height=700,
@@ -155,7 +156,7 @@ if st.button("開始回測 🚀"):
     col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
     col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
 
-    # === 買賣次數 ===
+    # === 買賣次數統計 ===
     st.subheader("🟢 交易次數統計")
     c7, c8 = st.columns(2)
     c7.metric("買進次數", buy_count)
@@ -165,6 +166,4 @@ if st.button("開始回測 🚀"):
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（已自動抓取前一年暖機資料）")
-
-
+    st.success("✅ 回測完成！（已修正報酬算法，並自動抓取前一年暖機資料）")
