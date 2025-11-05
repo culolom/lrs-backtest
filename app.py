@@ -1,4 +1,4 @@
-# app.py — Leverage Rotation Strategy (SMA/EMA 互動回測版 + Plotly)
+# app.py — Leverage Rotation Strategy (SMA/EMA + 年度交易次數圖 + Plotly 互動回測)
 
 import os
 import yfinance as yf
@@ -85,7 +85,19 @@ if st.button("開始回測 🚀"):
             sell_points.append((df.index[i], price))
         prev_signal = signal
 
-    # === Plotly 互動圖 ===
+    buy_count = len(buy_points)
+    sell_count = len(sell_points)
+
+    # === 年度交易次數統計 ===
+    buy_years = pd.Series([b[0].year for b in buy_points]) if buy_points else pd.Series(dtype=int)
+    sell_years = pd.Series([s[0].year for s in sell_points]) if sell_points else pd.Series(dtype=int)
+    trade_df = pd.DataFrame({
+        "Year": sorted(set(buy_years.tolist() + sell_years.tolist())),
+        "Buy": buy_years.value_counts().sort_index().reindex(sorted(set(buy_years.tolist() + sell_years.tolist())), fill_value=0).values if not buy_years.empty else [],
+        "Sell": sell_years.value_counts().sort_index().reindex(sorted(set(buy_years.tolist() + sell_years.tolist())), fill_value=0).values if not sell_years.empty else []
+    })
+
+    # === Plotly 主圖 ===
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
@@ -121,18 +133,17 @@ if st.button("開始回測 🚀"):
         name="Buy & Hold",
         line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
 
-    # --- Layout 美化 ---
     fig.update_layout(
         height=700,
         template="plotly_white",
         title=dict(text=f"📈 {symbol} — {ma_type}{window} 移動平均策略回測", x=0.5, font=dict(size=20)),
-        legend=dict(orientation="h", y=-0.2),
+        legend=dict(orientation="h", y=-0.25),
         hovermode="x unified",
         margin=dict(l=40, r=40, t=80, b=60),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # === 顯示回測結果 ===
+    # === 總體績效 ===
     st.subheader("📊 回測績效摘要")
     col1, col2, col3 = st.columns(3)
     col1.metric("LRS 總報酬", f"{final_return_lrs:.2%}")
@@ -143,6 +154,27 @@ if st.button("開始回測 🚀"):
     col4.metric("Buy&Hold 總報酬", f"{final_return_bh:.2%}")
     col5.metric("Buy&Hold 年化報酬", f"{cagr_bh:.2%}")
     col6.metric("Buy&Hold 最大回撤", f"{mdd_bh:.2%}")
+
+    # === 買賣次數統計 ===
+    st.subheader("🟢 交易次數統計")
+    col7, col8 = st.columns(2)
+    col7.metric("買進次數", buy_count)
+    col8.metric("賣出次數", sell_count)
+
+    # === 年度交易次數分佈圖 ===
+    if not trade_df.empty:
+        fig_trade = go.Figure()
+        fig_trade.add_bar(x=trade_df["Year"], y=trade_df["Buy"], name="買進次數", marker_color="#27AE60")
+        fig_trade.add_bar(x=trade_df["Year"], y=trade_df["Sell"], name="賣出次數", marker_color="#E74C3C")
+        fig_trade.update_layout(
+            barmode="group",
+            template="plotly_white",
+            title="📅 每年交易次數分佈",
+            xaxis_title="年份",
+            yaxis_title="次數",
+            height=400,
+        )
+        st.plotly_chart(fig_trade, use_container_width=True)
 
     # === 匯出結果 CSV ===
     csv = df.to_csv().encode("utf-8")
