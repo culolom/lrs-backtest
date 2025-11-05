@@ -41,7 +41,7 @@ col4, col5 = st.columns(2)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 50, 300, 200, 10)
+    window = st.slider("均線天數", 50, 200, 200, 10)
 
 # === 按下按鈕後回測 ===
 if st.button("開始回測 🚀"):
@@ -166,3 +166,4 @@ if st.button("開始回測 🚀"):
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
     st.success("✅ 回測完成！（已自動抓取前一年暖機資料）")
+
