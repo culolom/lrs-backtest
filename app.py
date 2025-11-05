@@ -1,4 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（含交易次數、報酬圖與熱力圖完整版）
+# app.py — LRS SMA/EMA 回測系統（美化版績效報表 + 完整可部署）
 import os
 import yfinance as yf
 import pandas as pd
@@ -92,7 +92,7 @@ if st.button("開始回測 🚀"):
     })
     yearly_trade["總交易次數"] = yearly_trade["買進次數"] + yearly_trade["賣出次數"]
 
-    # === 績效計算 ===
+    # === 績效與風控 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
@@ -114,35 +114,75 @@ if st.button("開始回測 🚀"):
     vol_lrs, sharpe_lrs, sortino_lrs = calc_metrics(df["Strategy_Return"])
     vol_bh, sharpe_bh, sortino_bh = calc_metrics(df["Return"])
 
-    # === 風控 ===
     loss_streak = (df["Strategy_Return"] < 0).astype(int)
     max_consecutive_loss = loss_streak.groupby(loss_streak.diff().ne(0).cumsum()).transform("size")[loss_streak == 1].max()
     flat_days = (df["Position"] == 0).astype(int)
     max_flat_days = flat_days.groupby(flat_days.diff().ne(0).cumsum()).transform("size")[flat_days == 1].max()
 
-    # === 綜合報表 ===
-    st.markdown("<h2 style='margin-top:1.5em;'>📊 綜合回測績效報表</h2>", unsafe_allow_html=True)
-    summary_data = {
-        "指標": [
-            "總報酬", "年化報酬", "最大回撤", "年化波動率",
-            "夏普值", "索提諾值", "最大連續虧損天數", "最長空倉天數",
-            "買進次數", "賣出次數"
-        ],
-        "LRS": [
-            f"{final_return_lrs:.2%}", f"{cagr_lrs:.2%}", f"{mdd_lrs:.2%}",
-            f"{vol_lrs:.2%}", f"{sharpe_lrs:.2f}", f"{sortino_lrs:.2f}",
-            f"{int(max_consecutive_loss)} 天", f"{int(max_flat_days)} 天",
-            f"{buy_count}", f"{sell_count}"
-        ],
-        "Buy&Hold": [
-            f"{final_return_bh:.2%}", f"{cagr_bh:.2%}", f"{mdd_bh:.2%}",
-            f"{vol_bh:.2%}", f"{sharpe_bh:.2f}", f"{sortino_bh:.2f}",
-            "—", "—", "—", "—"
-        ]
+    # === 綜合報表（美化版） ===
+    st.markdown("""
+    <h2 style='margin-top:1.5em; text-align:left;'>📊 綜合回測績效報表</h2>
+    <style>
+    table.custom-table {
+      border-collapse: collapse;
+      width: 95%;
+      margin: 25px 0;
+      font-size: 16px;
+      text-align: center;
+      font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+      box-shadow: 0px 0px 6px rgba(0,0,0,0.1);
     }
+    .custom-table th {
+      background-color: #f0f4ff;
+      padding: 12px;
+      border-bottom: 2px solid #ddd;
+      font-weight: bold;
+      color: #2c3e50;
+    }
+    .custom-table td {
+      padding: 10px;
+      border-bottom: 1px solid #eee;
+      color: #2c3e50;
+    }
+    .custom-table tr:hover {
+      background-color: #fafafa;
+    }
+    .section-title {
+      background-color: #eaf2ff;
+      font-weight: bold;
+      text-align: left;
+      padding-left: 10px;
+      color: #2c3e50;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    summary_df = pd.DataFrame(summary_data)
-    st.table(summary_df)
+    html_table = f"""
+    <table class='custom-table'>
+    <thead>
+    <tr><th>指標類別</th><th>指標名稱</th><th>LRS 策略</th><th>Buy & Hold</th></tr>
+    </thead>
+    <tbody>
+    <tr class='section-title'><td colspan='4'>📈 績效指標</td></tr>
+    <tr><td></td><td>總報酬</td><td>{final_return_lrs:.2%}</td><td>{final_return_bh:.2%}</td></tr>
+    <tr><td></td><td>年化報酬</td><td>{cagr_lrs:.2%}</td><td>{cagr_bh:.2%}</td></tr>
+    <tr><td></td><td>最大回撤</td><td>{mdd_lrs:.2%}</td><td>{mdd_bh:.2%}</td></tr>
+    <tr><td></td><td>年化波動率</td><td>{vol_lrs:.2%}</td><td>{vol_bh:.2%}</td></tr>
+    <tr><td></td><td>夏普值</td><td>{sharpe_lrs:.2f}</td><td>{sharpe_bh:.2f}</td></tr>
+    <tr><td></td><td>索提諾值</td><td>{sortino_lrs:.2f}</td><td>{sortino_bh:.2f}</td></tr>
+
+    <tr class='section-title'><td colspan='4'>🛡️ 風控指標</td></tr>
+    <tr><td></td><td>最大連續虧損天數</td><td>{int(max_consecutive_loss)} 天</td><td>—</td></tr>
+    <tr><td></td><td>最長空倉天數</td><td>{int(max_flat_days)} 天</td><td>—</td></tr>
+
+    <tr class='section-title'><td colspan='4'>💹 交易統計</td></tr>
+    <tr><td></td><td>買進次數</td><td>{buy_count}</td><td>—</td></tr>
+    <tr><td></td><td>賣出次數</td><td>{sell_count}</td><td>—</td></tr>
+    </tbody>
+    </table>
+    """
+    st.markdown(html_table, unsafe_allow_html=True)
+ 
 
     # === 年度交易次數圖 ===
     st.markdown("<h3 style='margin-top:2em;'>📊 年度交易次數統計</h3>", unsafe_allow_html=True)
@@ -218,3 +258,4 @@ if st.button("開始回測 🚀"):
     st.markdown(f"**平均年報酬：{avg_year:.1f}%　平均月勝率：{avg_win:.1f}%**")
 
     st.success("✅ 回測完成！")
+
