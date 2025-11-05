@@ -1,4 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（含交易次數年度統計）
+# app.py — LRS SMA/EMA 回測系統（含交易次數、報酬圖與熱力圖完整版）
 import os
 import yfinance as yf
 import pandas as pd
@@ -144,7 +144,7 @@ if st.button("開始回測 🚀"):
     summary_df = pd.DataFrame(summary_data)
     st.table(summary_df)
 
-    # === 年度交易次數柱狀圖 ===
+    # === 年度交易次數圖 ===
     st.markdown("<h3 style='margin-top:2em;'>📊 年度交易次數統計</h3>", unsafe_allow_html=True)
     fig_trade = go.Figure()
     fig_trade.add_trace(go.Bar(x=yearly_trade["年份"], y=yearly_trade["買進次數"], name="買進", marker_color="#27AE60"))
@@ -152,5 +152,69 @@ if st.button("開始回測 🚀"):
     fig_trade.update_layout(barmode="group", template="plotly_white", height=400, xaxis_title="年份", yaxis_title="次數")
     st.plotly_chart(fig_trade, use_container_width=True)
 
-    # === 年報酬折線、月熱力、年摘要 ===（省略顯示，與前版相同）
-    # …（保持你上一版邏輯即可）
+    # === 買賣點圖 ===
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"), vertical_spacing=0.1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="收盤價", line=dict(color="#2E86AB", width=2)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["MA"], mode="lines", name=f"{ma_type}{window}", line=dict(color="#F39C12", width=2)), row=1, col=1)
+    if buy_points:
+        bx, by = zip(*buy_points)
+        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進", marker=dict(color="#27AE60", size=9, symbol="triangle-up")), row=1, col=1)
+    if sell_points:
+        sx, sy = zip(*sell_points)
+        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出", marker=dict(color="#E74C3C", size=9, symbol="x")), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], mode="lines", name=f"LRS 策略 ({ma_type}{window})", line=dict(color="#16A085", width=2)), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], mode="lines", name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
+    fig.update_layout(height=700, template="plotly_white", title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測結果", x=0.0, font=dict(size=26)))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # === 年度報酬線圖 ===
+    st.markdown("<h3 style='margin-top:2em;'>📆 年度報酬率比較</h3>", unsafe_allow_html=True)
+    yearly = df.resample("Y").last()
+    yearly["LRS_Annual_Return"] = yearly["Equity_LRS"].pct_change()
+    yearly["BH_Annual_Return"] = yearly["Equity_BuyHold"].pct_change()
+    if len(yearly) > 1:
+        yr = yearly.index.year
+        fig_line = go.Figure()
+        fig_line.add_trace(go.Scatter(x=yr, y=yearly["LRS_Annual_Return"] * 100, mode="lines+markers", name="LRS 年報酬率", line=dict(color="#16A085", width=3)))
+        fig_line.add_trace(go.Scatter(x=yr, y=yearly["BH_Annual_Return"] * 100, mode="lines+markers", name="Buy&Hold 年報酬率", line=dict(color="#7F8C8D", width=3, dash="dot")))
+        fig_line.update_layout(template="plotly_white", height=400, xaxis_title="年份", yaxis_title="報酬率 (%)", legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig_line, use_container_width=True)
+
+    # === 月度熱力圖 ===
+    st.markdown("<h3 style='margin-top:2em;'>🔥 月度報酬熱力圖 (LRS 策略)</h3>", unsafe_allow_html=True)
+    monthly = df["Strategy_Return"].resample("M").apply(lambda x: (1 + x).prod() - 1)
+    monthly_df = monthly.to_frame("Monthly_Return")
+    monthly_df["Year"] = monthly_df.index.year
+    monthly_df["Month"] = monthly_df.index.month
+    pivot = monthly_df.pivot(index="Year", columns="Month", values="Monthly_Return") * 100
+    pivot = pivot.fillna(0).round(1)
+    fig_heat = go.Figure(data=go.Heatmap(
+        z=pivot.values,
+        x=[f"{m}月" for m in pivot.columns],
+        y=pivot.index.astype(str),
+        colorscale="RdYlGn",
+        zmin=-10, zmax=10,
+        text=pivot.round(1).astype(str) + "%",
+        texttemplate="%{text}",
+        colorbar=dict(title="報酬率 (%)")
+    ))
+    fig_heat.update_layout(template="plotly_white", height=500, xaxis_title="月份", yaxis_title="年份", title="📊 LRS 策略月度報酬熱力圖")
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # === 年報酬摘要 ===
+    st.markdown("<h3 style='margin-top:2em;'>🧾 年度報酬摘要表格 (LRS 策略)</h3>", unsafe_allow_html=True)
+    year_summary = []
+    for year in sorted(monthly_df["Year"].unique()):
+        data = monthly_df[monthly_df["Year"] == year]
+        annual_ret = (1 + data["Monthly_Return"]).prod() - 1
+        monthly_avg = data["Monthly_Return"].mean()
+        win_rate = (data["Monthly_Return"] > 0).mean()
+        year_summary.append([year, f"{annual_ret:.2%}", f"{monthly_avg:.2%}", f"{win_rate*100:.0f}%"])
+    df_summary = pd.DataFrame(year_summary, columns=["年份", "年報酬率", "月平均報酬", "月勝率"])
+    avg_year = df_summary["年報酬率"].apply(lambda x: float(x.strip("%"))).mean()
+    avg_win = df_summary["月勝率"].apply(lambda x: float(x.strip("%"))).mean()
+    st.table(df_summary)
+    st.markdown(f"**平均年報酬：{avg_year:.1f}%　平均月勝率：{avg_win:.1f}%**")
+
+    st.success("✅ 回測完成！")
