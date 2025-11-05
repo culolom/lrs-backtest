@@ -1,4 +1,4 @@
-# app.py — LRS (SMA/EMA + Plotly + 修正版策略報酬 + 暖機一年 + 報酬歸一化)
+# app.py — LRS (SMA/EMA + Plotly + 修正版策略報酬 + 暖機一年 + 報酬歸一化 + 年度交易次數圖)
 
 import os
 import yfinance as yf
@@ -96,16 +96,28 @@ if st.button("開始回測 🚀"):
     buy_count = len(buy_points)
     sell_count = len(sell_points)
 
+    # === 年度交易次數統計 ===
+    if buy_points or sell_points:
+        buy_years = [d[0].year for d in buy_points]
+        sell_years = [d[0].year for d in sell_points]
+        buy_series = pd.Series(buy_years).value_counts().sort_index()
+        sell_series = pd.Series(sell_years).value_counts().sort_index()
+        years = sorted(set(buy_series.index) | set(sell_series.index))
+        buy_counts = [buy_series.get(y, 0) for y in years]
+        sell_counts = [sell_series.get(y, 0) for y in years]
+    else:
+        years, buy_counts, sell_counts = [], [], []
+
     # === 計算績效指標 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
-    years = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
-    cagr_lrs = (1 + final_return_lrs) ** (1 / years) - 1
-    cagr_bh = (1 + final_return_bh) ** (1 / years) - 1
+    years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
+    cagr_lrs = (1 + final_return_lrs) ** (1 / years_len) - 1
+    cagr_bh = (1 + final_return_bh) ** (1 / years_len) - 1
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    # === Plotly 圖表 ===
+    # === Plotly 主圖 ===
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
@@ -165,8 +177,24 @@ if st.button("開始回測 🚀"):
     c7.metric("買進次數", buy_count)
     c8.metric("賣出次數", sell_count)
 
+    # === 年度交易次數柱狀圖 ===
+    if years:
+        st.write("📅 年度交易次數分佈")
+        bar_fig = go.Figure()
+        bar_fig.add_trace(go.Bar(x=years, y=buy_counts, name="買進次數", marker_color="#27AE60"))
+        bar_fig.add_trace(go.Bar(x=years, y=sell_counts, name="賣出次數", marker_color="#E74C3C"))
+        bar_fig.update_layout(
+            barmode="group",
+            template="plotly_white",
+            xaxis_title="年份",
+            yaxis_title="次數",
+            height=400,
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(bar_fig, use_container_width=True)
+
     # === 匯出結果 CSV ===
     csv = df.to_csv().encode("utf-8")
     st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
 
-    st.success("✅ 回測完成！（報酬計算已修正並重設基準）")
+    st.success("✅ 回測完成！（含年度交易次數分析）")
