@@ -1,6 +1,8 @@
 import matplotlib.font_manager as fm
 import matplotlib
-font_path = "NotoSansTC-Bold.otf"
+
+# === 字型設定 ===
+font_path = "./NotoSansTC-Bold.ttf"  # 注意：檔名要完全相同（含大小寫）
 fm.fontManager.addfont(font_path)
 matplotlib.rcParams["font.family"] = "Noto Sans TC"
 matplotlib.rcParams["axes.unicode_minus"] = False
@@ -92,6 +94,7 @@ if st.button("開始分析 🚀"):
     st.write(f"跌破200SMA 次數：{below200_times}")
 
     st.success("✅ 分析完成！")
+
 
 
 
