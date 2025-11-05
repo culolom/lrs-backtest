@@ -1,4 +1,4 @@
-# app.py — LRS SMA/EMA 回測系統（整合版報表＋暖機＋穩定性指標）
+# app.py — LRS SMA/EMA 回測系統（整合報表版）
 
 import os
 import yfinance as yf
@@ -16,7 +16,7 @@ if os.path.exists(font_path):
     fm.fontManager.addfont(font_path)
     matplotlib.rcParams["font.family"] = "Noto Sans TC"
 else:
-    matplotlib.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "PingFang TC", "Heiti TC"]
+    matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK TC", "Microsoft JhengHei", "PingFang TC", "Heiti TC"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 # === Streamlit 頁面設定 ===
@@ -38,10 +38,10 @@ with col4:
 with col5:
     window = st.slider("均線天數", 50, 200, 200, 10)
 
-# === 主程式 ===
+# === 主回測流程 ===
 if st.button("開始回測 🚀"):
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
-    with st.spinner("資料下載中…（自動暖機一年）"):
+    with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
         if isinstance(df_raw.columns, pd.MultiIndex):
             df_raw.columns = df_raw.columns.get_level_values(0)
@@ -56,6 +56,7 @@ if st.button("開始回測 🚀"):
         if ma_type == "SMA"
         else df["Close"].ewm(span=window, adjust=False).mean()
     )
+
     df["Signal"] = np.where(df["Close"] > df["MA"], 1, 0)
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Position"] = df["Signal"].shift(1).fillna(0)
@@ -70,7 +71,7 @@ if st.button("開始回測 🚀"):
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
 
-    # === 買賣點偵測 ===
+    # === 買賣點 ===
     buy_points, sell_points = [], []
     prev_signal = None
     for i in range(len(df)):
@@ -85,16 +86,16 @@ if st.button("開始回測 🚀"):
             sell_points.append((df.index[i], price))
         prev_signal = signal
 
-    # === 績效 ===
+    # === 績效計算 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
-    years = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
-    cagr_lrs = (1 + final_return_lrs) ** (1 / years) - 1
-    cagr_bh = (1 + final_return_bh) ** (1 / years) - 1
+    years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
+    cagr_lrs = (1 + final_return_lrs) ** (1 / years_len) - 1
+    cagr_bh = (1 + final_return_bh) ** (1 / years_len) - 1
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
-    # === 穩定性指標 ===
+    # === 策略穩定性：LRS & BuyHold 對照 ===
     def calc_metrics(series):
         daily = series.dropna()
         avg = daily.mean()
@@ -108,7 +109,59 @@ if st.button("開始回測 🚀"):
     vol_lrs, sharpe_lrs, sortino_lrs = calc_metrics(df["Strategy_Return"])
     vol_bh, sharpe_bh, sortino_bh = calc_metrics(df["Return"])
 
-    # === 主圖 ===
+    # === 📊 綜合回測績效報表 ===
+    st.markdown("## 📊 綜合回測績效報表 (LRS vs Buy&Hold)")
+
+    summary_data = {
+        "指標": [
+            "總報酬",
+            "年化報酬",
+            "最大回撤",
+            "年化波動率",
+            "夏普值",
+            "索提諾值"
+        ],
+        "LRS": [
+            f"{final_return_lrs:.2%}",
+            f"{cagr_lrs:.2%}",
+            f"{mdd_lrs:.2%}",
+            f"{vol_lrs:.2%}",
+            f"{sharpe_lrs:.2f}",
+            f"{sortino_lrs:.2f}"
+        ],
+        "Buy&Hold": [
+            f"{final_return_bh:.2%}",
+            f"{cagr_bh:.2%}",
+            f"{mdd_bh:.2%}",
+            f"{vol_bh:.2%}",
+            f"{sharpe_bh:.2f}",
+            f"{sortino_bh:.2f}"
+        ]
+    }
+
+    def compare_metrics(lrs, bh, higher_better=True):
+        try:
+            lrs_val = float(lrs.strip('%'))
+            bh_val = float(bh.strip('%'))
+            return "勝" if (lrs_val > bh_val if higher_better else lrs_val < bh_val) else "敗"
+        except:
+            try:
+                return "勝" if float(lrs) > float(bh) else "敗"
+            except:
+                return "—"
+
+    comparison = []
+    for i, k in enumerate(summary_data["指標"]):
+        if k in ["最大回撤"]:
+            comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=False))
+        else:
+            comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=True))
+    summary_data["評比"] = comparison
+
+    summary_df = pd.DataFrame(summary_data)
+    st.table(summary_df)
+
+    # === 📈 主圖 ===
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         subplot_titles=(f"{symbol} {ma_type}{window} 買賣訊號", "策略績效對比"),
                         vertical_spacing=0.1)
@@ -129,56 +182,7 @@ if st.button("開始回測 🚀"):
     fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], mode="lines",
                              name="Buy & Hold", line=dict(color="#7F8C8D", width=2, dash="dot")), row=2, col=1)
     fig.update_layout(height=700, template="plotly_white",
-                      title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測",
-                                 x=0.0, xanchor="left",
-                                 font=dict(size=26, color="#2C3E50", family="Noto Sans TC")),
-                      legend=dict(orientation="h", y=-0.25),
-                      hovermode="x unified")
+                      title=dict(text=f"📈 {symbol} — {ma_type}{window} 回測", x=0.0, xanchor="left", font=dict(size=26)))
     st.plotly_chart(fig, use_container_width=True)
 
-    # === 📊 綜合回測績效報表 ===
-    st.markdown("## 📊 綜合回測績效報表 (LRS vs Buy&Hold)")
-
-    summary_data = {
-        "指標": ["總報酬", "年化報酬", "最大回撤", "年化波動率", "夏普值", "索提諾值"],
-        "LRS": [f"{final_return_lrs:.2%}", f"{cagr_lrs:.2%}", f"{mdd_lrs:.2%}", f"{vol_lrs:.2%}",
-                f"{sharpe_lrs:.2f}", f"{sortino_lrs:.2f}"],
-        "Buy&Hold": [f"{final_return_bh:.2%}", f"{cagr_bh:.2%}", f"{mdd_bh:.2%}", f"{vol_bh:.2%}",
-                     f"{sharpe_bh:.2f}", f"{sortino_bh:.2f}"]
-    }
-
-    def compare_metrics(lrs, bh, higher_better=True):
-        try:
-            lrs_val = float(lrs.strip('%'))
-            bh_val = float(bh.strip('%'))
-            return "勝" if (lrs_val > bh_val if higher_better else lrs_val < bh_val) else "敗"
-        except:
-            try:
-                return "勝" if float(lrs) > float(bh) else "敗"
-            except:
-                return "—"
-
-    comparison = []
-    for i, k in enumerate(summary_data["指標"]):
-        if k == "最大回撤":
-            comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=False))
-        else:
-            comparison.append(compare_metrics(summary_data["LRS"][i], summary_data["Buy&Hold"][i], higher_better=True))
-    summary_data["評比"] = comparison
-    summary_df = pd.DataFrame(summary_data)
-
-    st.dataframe(
-        summary_df.style.set_table_styles(
-            [{"selector": "thead", "props": [("background-color", "#1e1e1e"), ("color", "white"),
-                                             ("font-weight", "bold"), ("text-align", "center")]}]
-        ).apply(lambda s: ["color: #27AE60" if v == "勝" else "color: #E74C3C" for v in s] if s.name == "評比" else None,
-                axis=0),
-        use_container_width=True,
-        height=320
-    )
-
-    # === 匯出 CSV ===
-    csv = df.to_csv().encode("utf-8")
-    st.download_button("⬇️ 下載完整回測結果 CSV", csv, f"{symbol}_LRS_{ma_type}{window}.csv", "text/csv")
-
-    st.success("✅ 回測完成！（綜合報表 + 勝負對比顯示）")
+    st.success("✅ 回測完成！")
