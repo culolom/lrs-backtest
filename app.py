@@ -35,7 +35,7 @@ col4, col5 = st.columns(2)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 10, 200, 200, 10)
+    window = st.slider("均線天數", 50, 200, 200, 10)
 
 # === 主回測流程 ===
 if st.button("開始回測 🚀"):
@@ -306,5 +306,3 @@ if st.button("開始回測 🚀"):
     st.markdown(html_summary, unsafe_allow_html=True)
 
     st.success("✅ 回測完成！")
-
-
