@@ -42,6 +42,16 @@ with col6:
 
 # === 主程式 ===
 if st.button("開始回測 🚀"):
+    # 🔍 自動偵測最早可用資料起點
+    with st.spinner("偵測可用資料起點中…"):
+        info = yf.Ticker(symbol).history(period="max")
+        if not info.empty:
+            available_start = info.index.min().strftime("%Y-%m-%d")
+            st.info(f"🔍 {symbol} 可用資料起始日期：{available_start}")
+        else:
+            st.warning("⚠️ 無法取得該商品的最早資料。")
+
+    # 🧊 暖機期自動多抓一年
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
@@ -218,3 +228,4 @@ if st.button("開始回測 🚀"):
     st.markdown(html_table, unsafe_allow_html=True)
 
     st.success("✅ 回測完成！（空倉期間不再複利，模擬更真實）")
+
