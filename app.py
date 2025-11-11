@@ -1,4 +1,4 @@
-# app.py — LRS 回測系統（真實持倉模擬 + 自動偵測資料範圍 + 美化報表）
+# app.py — LRS 回測系統（自動偵測台股代號 + 美化報表 + 真實持倉模擬）
 
 import os
 import yfinance as yf
@@ -24,6 +24,14 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 st.set_page_config(page_title="LRS 回測系統", page_icon="📈", layout="wide")
 st.markdown("<h1 style='margin-bottom:0.5em;'>📊 Leverage Rotation Strategy — SMA/EMA 回測系統</h1>", unsafe_allow_html=True)
 
+# === 自動補 .TW 的函式 ===
+def normalize_symbol(symbol):
+    """讓使用者輸入 0050 / 2330 / 00878 時自動補上 .TW"""
+    s = symbol.strip().upper()
+    if s.isdigit() or (not "." in s and (s.startswith("00") or s.startswith("23") or s.startswith("008"))):
+        s += ".TW"
+    return s
+
 # === 函式：取得商品可用資料區間 ===
 @st.cache_data(show_spinner=False)
 def get_available_range(symbol):
@@ -35,9 +43,11 @@ def get_available_range(symbol):
 # === 使用者輸入 ===
 col1, col2, col3 = st.columns(3)
 with col1:
-    symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, SPXL, BTC-USD）", "00631L.TW")
+    raw_symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, 0050, 2330）", "0050")
 
-# 若使用者更換代號，重新載入日期區間
+symbol = normalize_symbol(raw_symbol)
+
+# 若使用者更換代號，自動偵測日期範圍
 if "last_symbol" not in st.session_state or st.session_state.last_symbol != symbol:
     st.session_state.last_symbol = symbol
     min_start, max_end = get_available_range(symbol)
@@ -70,13 +80,12 @@ col4, col5, col6 = st.columns(3)
 with col4:
     ma_type = st.selectbox("均線種類", ["SMA", "EMA"])
 with col5:
-    window = st.slider("均線天數", 50, 200, 200, 10)
+    window = st.slider("均線天數", 10, 200, 200, 10)
 with col6:
     initial_capital = st.number_input("投入本金（元）", 1000, 1_000_000, 10000, step=1000)
 
 # === 主程式 ===
 if st.button("開始回測 🚀"):
-    # 🧊 暖機期多抓一年
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
@@ -84,7 +93,7 @@ if st.button("開始回測 🚀"):
             df_raw.columns = df_raw.columns.get_level_values(0)
 
     if df_raw.empty:
-        st.error("⚠️ 無法下載資料，請檢查代號或時間區間。")
+        st.error(f"⚠️ 無法下載 {symbol} 的資料，請確認代號或時間區間。")
         st.stop()
 
     df = df_raw.copy()
@@ -105,9 +114,8 @@ if st.button("開始回測 🚀"):
         else:
             df.loc[df.index[i], "Signal"] = 0
 
-    # === 建立持倉狀態 ===
-    position = []
-    current = 1
+    # === 持倉 ===
+    position, current = [], 1
     for sig in df["Signal"]:
         if sig == 1:
             current = 1
@@ -116,11 +124,11 @@ if st.button("開始回測 🚀"):
         position.append(current)
     df["Position"] = position
 
-    # === 回報計算 ===
+    # === 回報 ===
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
 
-    # === 真實資金曲線（空倉不複利） ===
+    # === 真實資金曲線 ===
     df["Equity_LRS"] = 1.0
     for i in range(1, len(df)):
         if df["Position"].iloc[i - 1] == 1:
@@ -128,28 +136,21 @@ if st.button("開始回測 🚀"):
         else:
             df.loc[df.index[i], "Equity_LRS"] = df["Equity_LRS"].iloc[i - 1]
 
-    # === Buy & Hold ===
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # === 裁切範圍 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
 
-    # === 投入本金 ===
     df["LRS_Capital"] = df["Equity_LRS"] * initial_capital
     df["BH_Capital"] = df["Equity_BuyHold"] * initial_capital
 
     # === 買賣點 ===
-    buy_points, sell_points = [], []
-    for i in range(1, len(df)):
-        if df["Signal"].iloc[i] == 1:
-            buy_points.append((df.index[i], df["Close"].iloc[i]))
-        elif df["Signal"].iloc[i] == -1:
-            sell_points.append((df.index[i], df["Close"].iloc[i]))
+    buy_points = [(df.index[i], df["Close"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == 1]
+    sell_points = [(df.index[i], df["Close"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == -1]
     buy_count, sell_count = len(buy_points), len(sell_points)
 
-    # === 指標計算 ===
+    # === 指標 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = (df.index[-1] - df.index[0]).days / 365
@@ -176,61 +177,34 @@ if st.button("開始回測 🚀"):
 
     # === 圖表 ===
     st.markdown("<h2 style='margin-top:1em;'>📈 策略績效視覺化</h2>", unsafe_allow_html=True)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold"))
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold"))
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="收盤價", line=dict(color="blue")), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["MA"], name=f"{ma_type}{window}", line=dict(color="orange")), row=1, col=1)
     if buy_points:
         bx, by = zip(*buy_points)
-        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進", marker=dict(color="green", symbol="triangle-up", size=8)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進",
+                                 marker=dict(color="green", symbol="triangle-up", size=8)), row=1, col=1)
     if sell_points:
         sx, sy = zip(*sell_points)
-        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出", marker=dict(color="red", symbol="x", size=8)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略", line=dict(color="green")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold", line=dict(color="gray", dash="dot")), row=2, col=1)
+        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出",
+                                 marker=dict(color="red", symbol="x", size=8)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略",
+                             line=dict(color="green")), row=2, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold",
+                             line=dict(color="gray", dash="dot")), row=2, col=1)
     fig.update_layout(height=800, showlegend=True, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
-    # === CSS 美化報表 ===
+    # === 美化報表 ===
     st.markdown("""
     <style>
-    .custom-table {
-        width: 100%;
-        border-collapse: collapse;
-        margin-top: 1.2em;
-        font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif;
-        box-shadow: 0 3px 8px rgba(0,0,0,0.05);
-        border-radius: 10px;
-        overflow: hidden;
-    }
-    .custom-table th {
-        background-color: #f5f6fa;
-        color: #2c3e50;
-        text-align: center;
-        padding: 12px;
-        font-weight: 700;
-        border-bottom: 2px solid #e0e0e0;
-    }
-    .custom-table td {
-        text-align: center;
-        padding: 10px;
-        border-bottom: 1px solid #e9e9e9;
-        font-size: 15px;
-    }
-    .custom-table tr:nth-child(even) td {
-        background-color: #fafbfc;
-    }
-    .custom-table tr:hover td {
-        background-color: #f1f9ff;
-    }
-    .custom-table .section-title td {
-        background-color: #eef4ff;
-        color: #1a237e;
-        font-weight: 700;
-        font-size: 16px;
-        text-align: left;
-        padding: 10px 15px;
-        border-top: 2px solid #cfd8dc;
-    }
+    .custom-table { width:100%; border-collapse:collapse; margin-top:1.2em; font-family:"Noto Sans TC"; }
+    .custom-table th { background:#f5f6fa; padding:12px; font-weight:700; border-bottom:2px solid #ddd; }
+    .custom-table td { text-align:center; padding:10px; border-bottom:1px solid #eee; font-size:15px; }
+    .custom-table tr:nth-child(even) td { background-color:#fafbfc; }
+    .custom-table tr:hover td { background-color:#f1f9ff; }
+    .section-title td { background:#eef4ff; color:#1a237e; font-weight:700; font-size:16px; text-align:left; padding:10px 15px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -251,5 +225,4 @@ if st.button("開始回測 🚀"):
     </tbody></table>
     """
     st.markdown(html_table, unsafe_allow_html=True)
-
-    st.success("✅ 回測完成！（空倉期間不再複利，模擬更真實）")
+    st.success("✅ 回測完成！（支援自動辨識台股代號）")
