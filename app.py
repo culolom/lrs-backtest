@@ -1,4 +1,5 @@
-# app.py — LRS 回測系統（修正版：正確持倉邏輯 + 本金模擬 + 互動圖 + 美化報表）
+# app.py — LRS 回測系統（真實持倉模擬版：空倉不複利 + 第一日強制投入本金）
+
 import os
 import yfinance as yf
 import pandas as pd
@@ -58,21 +59,20 @@ if st.button("開始回測 🚀"):
         else df["Close"].ewm(span=window, adjust=False).mean()
     )
 
-    # === 正確持倉邏輯 ===
+    # === 建立交易訊號（含第一天強制買入）
     df["Signal"] = 0
-    df.loc[df.index[0], "Signal"] = 1  # 第一筆強制買入
-
+    df.loc[df.index[0], "Signal"] = 1
     for i in range(1, len(df)):
         if df["Close"].iloc[i] > df["MA"].iloc[i] and df["Close"].iloc[i - 1] <= df["MA"].iloc[i - 1]:
-            df.loc[df.index[i], "Signal"] = 1  # 買入
+            df.loc[df.index[i], "Signal"] = 1
         elif df["Close"].iloc[i] < df["MA"].iloc[i] and df["Close"].iloc[i - 1] >= df["MA"].iloc[i - 1]:
-            df.loc[df.index[i], "Signal"] = -1  # 賣出
+            df.loc[df.index[i], "Signal"] = -1
         else:
-            df.loc[df.index[i], "Signal"] = 0  # 不動作
+            df.loc[df.index[i], "Signal"] = 0
 
-    # === 建立持倉狀態 ===
+    # === 建立持倉狀態
     position = []
-    current = 1  # 已投入，初始持倉
+    current = 1
     for sig in df["Signal"]:
         if sig == 1:
             current = 1
@@ -84,19 +84,28 @@ if st.button("開始回測 🚀"):
     # === 報酬計算 ===
     df["Return"] = df["Close"].pct_change().fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
-    df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
+
+    # === 真實資金曲線：空倉不複利 ===
+    df["Equity_LRS"] = 1.0
+    for i in range(1, len(df)):
+        if df["Position"].iloc[i-1] == 1:
+            df.loc[df.index[i], "Equity_LRS"] = df["Equity_LRS"].iloc[i-1] * (1 + df["Return"].iloc[i])
+        else:
+            df.loc[df.index[i], "Equity_LRS"] = df["Equity_LRS"].iloc[i-1]
+
+    # === Buy & Hold ===
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # 篩出回測區間
+    # === 裁切回測區間 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
 
-    # === 本金模擬 ===
+    # === 模擬本金 ===
     df["LRS_Capital"] = df["Equity_LRS"] * initial_capital
     df["BH_Capital"] = df["Equity_BuyHold"] * initial_capital
 
-    # === 買賣點 ===
+    # === 買賣點統計 ===
     buy_points, sell_points = [], []
     for i in range(1, len(df)):
         if df["Signal"].iloc[i] == 1:
@@ -105,7 +114,7 @@ if st.button("開始回測 🚀"):
             sell_points.append((df.index[i], df["Close"].iloc[i]))
     buy_count, sell_count = len(buy_points), len(sell_points)
 
-    # === 績效計算 ===
+    # === 指標計算 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = max((df.index[-1] - df.index[0]).days / 365, 1e-9)
@@ -130,11 +139,10 @@ if st.button("開始回測 🚀"):
     equity_lrs_final = df["LRS_Capital"].iloc[-1]
     equity_bh_final = df["BH_Capital"].iloc[-1]
 
-    # === Plotly 視覺化 ===
-    st.markdown("<h2 style='margin-top:1em;'>📈 策略與績效視覺化</h2>", unsafe_allow_html=True)
+    # === 視覺化 ===
+    st.markdown("<h2 style='margin-top:1em;'>📈 策略績效視覺化</h2>", unsafe_allow_html=True)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        subplot_titles=("收盤價與均線（含買賣點）", "策略績效曲線"))
-    # 收盤價圖
+                        subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold"))
     fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="收盤價", line=dict(color="blue")), row=1, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["MA"], name=f"{ma_type}{window}", line=dict(color="orange")), row=1, col=1)
     if buy_points:
@@ -143,49 +151,12 @@ if st.button("開始回測 🚀"):
     if sell_points:
         sx, sy = zip(*sell_points)
         fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出", marker=dict(color="red", symbol="x", size=8)), row=1, col=1)
-
-    # 績效曲線
     fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略", line=dict(color="green")), row=2, col=1)
     fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold", line=dict(color="gray", dash="dot")), row=2, col=1)
     fig.update_layout(height=800, showlegend=True, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
     # === 綜合績效報表 ===
-    st.markdown("""
-    <h2 style='margin-top:1.5em; text-align:left;'>📊 綜合回測績效報表</h2>
-    <style>
-    table.custom-table {
-      border-collapse: collapse;
-      width: 95%;
-      margin: 25px 0;
-      font-size: 16px;
-      text-align: center;
-      font-family: "Noto Sans TC", "Microsoft JhengHei", sans-serif;
-      box-shadow: 0px 0px 6px rgba(0,0,0,0.1);
-    }
-    .custom-table th {
-      background-color: #f0f4ff;
-      padding: 12px;
-      border-bottom: 2px solid #ddd;
-      font-weight: bold;
-      color: #2c3e50;
-    }
-    .custom-table td {
-      padding: 10px;
-      border-bottom: 1px solid #eee;
-      color: #2c3e50;
-    }
-    .custom-table tr:hover { background-color: #fafafa; }
-    .section-title {
-      background-color: #eaf2ff;
-      font-weight: bold;
-      text-align: left;
-      padding-left: 10px;
-      color: #2c3e50;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
     html_table = f"""
     <table class='custom-table'>
     <thead><tr><th>指標名稱</th><th>LRS 策略</th><th>Buy & Hold</th></tr></thead>
@@ -197,11 +168,10 @@ if st.button("開始回測 🚀"):
     <tr><td>年化波動率</td><td>{vol_lrs:.2%}</td><td>{vol_bh:.2%}</td></tr>
     <tr><td>夏普值</td><td>{sharpe_lrs:.2f}</td><td>{sharpe_bh:.2f}</td></tr>
     <tr><td>索提諾值</td><td>{sortino_lrs:.2f}</td><td>{sortino_bh:.2f}</td></tr>
-    <tr class='section-title'><td colspan='3'>💹 交易統計</td></tr>
     <tr><td>買進次數</td><td>{buy_count}</td><td>—</td></tr>
     <tr><td>賣出次數</td><td>{sell_count}</td><td>—</td></tr>
     </tbody></table>
     """
     st.markdown(html_table, unsafe_allow_html=True)
 
-    st.success("✅ 回測完成！")
+    st.success("✅ 回測完成！（空倉期間不再複利，模擬更真實）")
