@@ -1,10 +1,11 @@
-# app.py — LRS 回測系統（真實持倉模擬 + 美化報表）
+# app.py — LRS 回測系統（真實持倉模擬 + 自動偵測資料範圍 + 美化報表）
 
 import os
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import streamlit as st
+import datetime as dt
 import matplotlib.font_manager as fm
 import matplotlib
 import plotly.graph_objects as go
@@ -23,14 +24,47 @@ matplotlib.rcParams["axes.unicode_minus"] = False
 st.set_page_config(page_title="LRS 回測系統", page_icon="📈", layout="wide")
 st.markdown("<h1 style='margin-bottom:0.5em;'>📊 Leverage Rotation Strategy — SMA/EMA 回測系統</h1>", unsafe_allow_html=True)
 
+# === 函式：取得商品可用資料區間 ===
+@st.cache_data(show_spinner=False)
+def get_available_range(symbol):
+    hist = yf.Ticker(symbol).history(period="max", auto_adjust=True)
+    if hist.empty:
+        return pd.to_datetime("1990-01-01").date(), dt.date.today()
+    return hist.index.min().date(), hist.index.max().date()
+
 # === 使用者輸入 ===
 col1, col2, col3 = st.columns(3)
 with col1:
     symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, SPXL, BTC-USD）", "00631L.TW")
+
+# 若使用者更換代號，重新載入日期區間
+if "last_symbol" not in st.session_state or st.session_state.last_symbol != symbol:
+    st.session_state.last_symbol = symbol
+    min_start, max_end = get_available_range(symbol)
+    st.session_state.min_start = min_start
+    st.session_state.max_end = max_end
+else:
+    min_start = st.session_state.min_start
+    max_end = st.session_state.max_end
+
+st.info(f"🔎 {symbol} 可用資料區間：{min_start} ~ {max_end}")
+
 with col2:
-    start = st.date_input("開始日期", pd.to_datetime("2023-01-01"))
+    start = st.date_input(
+        "開始日期",
+        value=max(min_start, pd.to_datetime("2013-01-01").date()),
+        min_value=min_start,
+        max_value=max_end,
+        format="YYYY/MM/DD",
+    )
 with col3:
-    end = st.date_input("結束日期", pd.to_datetime("2025-01-01"))
+    end = st.date_input(
+        "結束日期",
+        value=max_end,
+        min_value=min_start,
+        max_value=max_end,
+        format="YYYY/MM/DD",
+    )
 
 col4, col5, col6 = st.columns(3)
 with col4:
@@ -42,16 +76,7 @@ with col6:
 
 # === 主程式 ===
 if st.button("開始回測 🚀"):
-    # 🔍 自動偵測最早可用資料起點
-    with st.spinner("偵測可用資料起點中…"):
-        info = yf.Ticker(symbol).history(period="max")
-        if not info.empty:
-            available_start = info.index.min().strftime("%Y-%m-%d")
-            st.info(f"🔍 {symbol} 可用資料起始日期：{available_start}")
-        else:
-            st.warning("⚠️ 無法取得該商品的最早資料。")
-
-    # 🧊 暖機期自動多抓一年
+    # 🧊 暖機期多抓一年
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
         df_raw = yf.download(symbol, start=start_early, end=end)
@@ -124,7 +149,7 @@ if st.button("開始回測 🚀"):
             sell_points.append((df.index[i], df["Close"].iloc[i]))
     buy_count, sell_count = len(buy_points), len(sell_points)
 
-    # === 指標 ===
+    # === 指標計算 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = (df.index[-1] - df.index[0]).days / 365
@@ -228,4 +253,3 @@ if st.button("開始回測 🚀"):
     st.markdown(html_table, unsafe_allow_html=True)
 
     st.success("✅ 回測完成！（空倉期間不再複利，模擬更真實）")
-
