@@ -35,6 +35,7 @@ def normalize_symbol(symbol):
 # === 函式：取得商品可用資料區間 ===
 @st.cache_data(show_spinner=False)
 def get_available_range(symbol):
+    # 這裡用 auto_adjust=True，只拿日期範圍
     hist = yf.Ticker(symbol).history(period="max", auto_adjust=True)
     if hist.empty:
         return pd.to_datetime("1990-01-01").date(), dt.date.today()
@@ -88,7 +89,8 @@ with col6:
 if st.button("開始回測 🚀"):
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
-        df_raw = yf.download(symbol, start=start_early, end=end)
+        # 這裡改用 auto_adjust=False，手動選 Adj Close / Close
+        df_raw = yf.download(symbol, start=start_early, end=end, auto_adjust=False)
         if isinstance(df_raw.columns, pd.MultiIndex):
             df_raw.columns = df_raw.columns.get_level_values(0)
 
@@ -96,20 +98,26 @@ if st.button("開始回測 🚀"):
         st.error(f"⚠️ 無法下載 {symbol} 的資料，請確認代號或時間區間。")
         st.stop()
 
+    # === 使用調整後股價（Adj Close）計算 ===
+    price_col = "Adj Close" if "Adj Close" in df_raw.columns else "Close"
+
     df = df_raw.copy()
+    df["Price"] = df[price_col]
+
+    # === 均線 ===
     df["MA"] = (
-        df["Close"].rolling(window=window).mean()
+        df["Price"].rolling(window=window).mean()
         if ma_type == "SMA"
-        else df["Close"].ewm(span=window, adjust=False).mean()
+        else df["Price"].ewm(span=window, adjust=False).mean()
     )
 
     # === 生成訊號（第一天強制買入） ===
     df["Signal"] = 0
     df.loc[df.index[0], "Signal"] = 1
     for i in range(1, len(df)):
-        if df["Close"].iloc[i] > df["MA"].iloc[i] and df["Close"].iloc[i - 1] <= df["MA"].iloc[i - 1]:
+        if df["Price"].iloc[i] > df["MA"].iloc[i] and df["Price"].iloc[i - 1] <= df["MA"].iloc[i - 1]:
             df.loc[df.index[i], "Signal"] = 1
-        elif df["Close"].iloc[i] < df["MA"].iloc[i] and df["Close"].iloc[i - 1] >= df["MA"].iloc[i - 1]:
+        elif df["Price"].iloc[i] < df["MA"].iloc[i] and df["Price"].iloc[i - 1] >= df["MA"].iloc[i - 1]:
             df.loc[df.index[i], "Signal"] = -1
         else:
             df.loc[df.index[i], "Signal"] = 0
@@ -124,8 +132,8 @@ if st.button("開始回測 🚀"):
         position.append(current)
     df["Position"] = position
 
-    # === 回報 ===
-    df["Return"] = df["Close"].pct_change().fillna(0)
+    # === 回報（用調整後股價） ===
+    df["Return"] = df["Price"].pct_change().fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
 
     # === 真實資金曲線 ===
@@ -138,6 +146,7 @@ if st.button("開始回測 🚀"):
 
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
+    # 只保留選定區間
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -145,9 +154,9 @@ if st.button("開始回測 🚀"):
     df["LRS_Capital"] = df["Equity_LRS"] * initial_capital
     df["BH_Capital"] = df["Equity_BuyHold"] * initial_capital
 
-    # === 買賣點 ===
-    buy_points = [(df.index[i], df["Close"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == 1]
-    sell_points = [(df.index[i], df["Close"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == -1]
+    # === 買賣點（用調整後股價） ===
+    buy_points = [(df.index[i], df["Price"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == 1]
+    sell_points = [(df.index[i], df["Price"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == -1]
     buy_count, sell_count = len(buy_points), len(sell_points)
 
     # === 指標 ===
@@ -177,22 +186,50 @@ if st.button("開始回測 🚀"):
 
     # === 圖表 ===
     st.markdown("<h2 style='margin-top:1em;'>📈 策略績效視覺化</h2>", unsafe_allow_html=True)
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="收盤價", line=dict(color="blue")), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA"], name=f"{ma_type}{window}", line=dict(color="orange")), row=1, col=1)
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold")
+    )
+
+    # 用調整後股價畫「收盤價」
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df["Price"], name="收盤價", line=dict(color="blue")),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df["MA"], name=f"{ma_type}{window}", line=dict(color="orange")),
+        row=1, col=1
+    )
+
     if buy_points:
         bx, by = zip(*buy_points)
-        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers", name="買進",
-                                 marker=dict(color="green", symbol="triangle-up", size=8)), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=bx, y=by, mode="markers", name="買進",
+                marker=dict(color="green", symbol="triangle-up", size=8)
+            ),
+            row=1, col=1
+        )
     if sell_points:
         sx, sy = zip(*sell_points)
-        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers", name="賣出",
-                                 marker=dict(color="red", symbol="x", size=8)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略",
-                             line=dict(color="green")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold",
-                             line=dict(color="gray", dash="dot")), row=2, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=sx, y=sy, mode="markers", name="賣出",
+                marker=dict(color="red", symbol="x", size=8)
+            ),
+            row=1, col=1
+        )
+
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略", line=dict(color="green")),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold", line=dict(color="gray", dash="dot")),
+        row=2, col=1
+    )
     fig.update_layout(height=800, showlegend=True, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
