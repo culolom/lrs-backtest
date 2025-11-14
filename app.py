@@ -26,7 +26,6 @@ st.markdown("<h1 style='margin-bottom:0.5em;'>📊 Leverage Rotation Strategy �
 
 # === 自動補 .TW 的函式 ===
 def normalize_symbol(symbol):
-    """讓使用者輸入 0050 / 2330 / 00878 時自動補上 .TW"""
     s = symbol.strip().upper()
     if s.isdigit() or (not "." in s and (s.startswith("00") or s.startswith("23") or s.startswith("008"))):
         s += ".TW"
@@ -35,7 +34,6 @@ def normalize_symbol(symbol):
 # === 函式：取得商品可用資料區間 ===
 @st.cache_data(show_spinner=False)
 def get_available_range(symbol):
-    # 這裡用 auto_adjust=True，只拿日期範圍
     hist = yf.Ticker(symbol).history(period="max", auto_adjust=True)
     if hist.empty:
         return pd.to_datetime("1990-01-01").date(), dt.date.today()
@@ -48,7 +46,7 @@ with col1:
 
 symbol = normalize_symbol(raw_symbol)
 
-# 若使用者更換代號，自動偵測日期範圍
+# 自動偵測日期
 if "last_symbol" not in st.session_state or st.session_state.last_symbol != symbol:
     st.session_state.last_symbol = symbol
     min_start, max_end = get_available_range(symbol)
@@ -68,6 +66,7 @@ with col2:
         max_value=max_end,
         format="YYYY/MM/DD",
     )
+
 with col3:
     end = st.date_input(
         "結束日期",
@@ -88,21 +87,25 @@ with col6:
 # === 主程式 ===
 if st.button("開始回測 🚀"):
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
+
     with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
-        # 這裡改用 auto_adjust=False，手動選 Adj Close / Close
         df_raw = yf.download(symbol, start=start_early, end=end, auto_adjust=False)
+
         if isinstance(df_raw.columns, pd.MultiIndex):
             df_raw.columns = df_raw.columns.get_level_values(0)
 
     if df_raw.empty:
-        st.error(f"⚠️ 無法下載 {symbol} 的資料，請確認代號或時間區間。")
+        st.error(f"⚠️ 無法下載 {symbol} 的資料")
         st.stop()
 
-    # === 使用調整後股價（Adj Close）計算 ===
+    # === ★ 最重要修正：統一使用調整後股價 ===
     price_col = "Adj Close" if "Adj Close" in df_raw.columns else "Close"
 
     df = df_raw.copy()
-    df["Price"] = df[price_col]
+    df["Price"] = df[price_col].copy()
+
+    # 🔥 強制覆蓋 Close（避免任何地方誤用）
+    df["Close"] = df["Price"]
 
     # === 均線 ===
     df["MA"] = (
@@ -111,16 +114,15 @@ if st.button("開始回測 🚀"):
         else df["Price"].ewm(span=window, adjust=False).mean()
     )
 
-    # === 生成訊號（第一天強制買入） ===
+    # === 訊號（第一天強制買入） ===
     df["Signal"] = 0
     df.loc[df.index[0], "Signal"] = 1
+
     for i in range(1, len(df)):
         if df["Price"].iloc[i] > df["MA"].iloc[i] and df["Price"].iloc[i - 1] <= df["MA"].iloc[i - 1]:
             df.loc[df.index[i], "Signal"] = 1
         elif df["Price"].iloc[i] < df["MA"].iloc[i] and df["Price"].iloc[i - 1] >= df["MA"].iloc[i - 1]:
             df.loc[df.index[i], "Signal"] = -1
-        else:
-            df.loc[df.index[i], "Signal"] = 0
 
     # === 持倉 ===
     position, current = [], 1
@@ -132,11 +134,11 @@ if st.button("開始回測 🚀"):
         position.append(current)
     df["Position"] = position
 
-    # === 回報（用調整後股價） ===
+    # === 報酬 ===
     df["Return"] = df["Price"].pct_change().fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
 
-    # === 真實資金曲線 ===
+    # === 資金曲線 ===
     df["Equity_LRS"] = 1.0
     for i in range(1, len(df)):
         if df["Position"].iloc[i - 1] == 1:
@@ -146,7 +148,7 @@ if st.button("開始回測 🚀"):
 
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
-    # 只保留選定區間
+    # === 裁切區間 ===
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -154,12 +156,13 @@ if st.button("開始回測 🚀"):
     df["LRS_Capital"] = df["Equity_LRS"] * initial_capital
     df["BH_Capital"] = df["Equity_BuyHold"] * initial_capital
 
-    # === 買賣點（用調整後股價） ===
+    # === 買賣點 ===
     buy_points = [(df.index[i], df["Price"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == 1]
     sell_points = [(df.index[i], df["Price"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == -1]
+
     buy_count, sell_count = len(buy_points), len(sell_points)
 
-    # === 指標 ===
+    # === 評估指標 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
     years_len = (df.index[-1] - df.index[0]).days / 365
@@ -186,6 +189,7 @@ if st.button("開始回測 🚀"):
 
     # === 圖表 ===
     st.markdown("<h2 style='margin-top:1em;'>📈 策略績效視覺化</h2>", unsafe_allow_html=True)
+
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -193,11 +197,12 @@ if st.button("開始回測 🚀"):
         subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold")
     )
 
-    # 用調整後股價畫「收盤價」
+    # 收盤價
     fig.add_trace(
         go.Scatter(x=df.index, y=df["Price"], name="收盤價", line=dict(color="blue")),
         row=1, col=1
     )
+
     fig.add_trace(
         go.Scatter(x=df.index, y=df["MA"], name=f"{ma_type}{window}", line=dict(color="orange")),
         row=1, col=1
@@ -212,6 +217,7 @@ if st.button("開始回測 🚀"):
             ),
             row=1, col=1
         )
+
     if sell_points:
         sx, sy = zip(*sell_points)
         fig.add_trace(
@@ -222,6 +228,7 @@ if st.button("開始回測 🚀"):
             row=1, col=1
         )
 
+    # 資金曲線
     fig.add_trace(
         go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略", line=dict(color="green")),
         row=2, col=1
@@ -230,6 +237,7 @@ if st.button("開始回測 🚀"):
         go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold", line=dict(color="gray", dash="dot")),
         row=2, col=1
     )
+
     fig.update_layout(height=800, showlegend=True, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
@@ -261,5 +269,6 @@ if st.button("開始回測 🚀"):
     <tr><td>賣出次數</td><td>{sell_count}</td><td>—</td></tr>
     </tbody></table>
     """
+
     st.markdown(html_table, unsafe_allow_html=True)
-    st.success("✅ 回測完成！（支援自動辨識台股代號）")
+    st.success("✅ 回測完成！（使用調整後股價，已修正 2013/12 垂直落差）")
