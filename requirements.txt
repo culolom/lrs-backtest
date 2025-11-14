@@ -1,6 +1,9 @@
-streamlit
+FinMind
 yfinance
 pandas
 numpy
-matplotlib
 plotly
+streamlit
+matplotlib
+python-dateutil
+requests
