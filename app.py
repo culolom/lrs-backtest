@@ -1,16 +1,18 @@
-# app.py — LRS 回測系統（自動偵測台股代號 + 跳價修復 + 美化報表）
+# app.py — LRS 回測系統（台股用 TWSE API，美股用 yfinance，含拆股調整 + 美化報表）
 
 import os
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import streamlit as st
+import math
 import datetime as dt
-import matplotlib.font_manager as fm
+
+import numpy as np
+import pandas as pd
+import requests
+import yfinance as yf
+import streamlit as st
 import matplotlib
+import matplotlib.font_manager as fm
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
 
 # === 字型設定 ===
 font_path = "./NotoSansTC-Bold.ttf"
@@ -21,81 +23,234 @@ else:
     matplotlib.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "PingFang TC", "Heiti TC"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-
 # === Streamlit 頁面設定 ===
 st.set_page_config(page_title="LRS 回測系統", page_icon="📈", layout="wide")
 st.markdown("<h1 style='margin-bottom:0.5em;'>📊 Leverage Rotation Strategy — SMA/EMA 回測系統</h1>", unsafe_allow_html=True)
 
 
-# === 🟦 自動補 .TW ===
-def normalize_symbol(symbol):
-    s = symbol.strip().upper()
-    if s.isdigit() or (not "." in s and (s.startswith("00") or s.startswith("23") or s.startswith("008"))):
-        s += ".TW"
+# -----------------------------------------------------------------------------
+# 公用小工具
+# -----------------------------------------------------------------------------
+def is_taiwan_stock(raw_symbol: str) -> bool:
+    """
+    判斷是否當成台股處理：
+    - 純數字（0050, 2330, 00878...）視為台股
+    - 其它 (QQQ, SPY...) 視為海外商品
+    """
+    s = raw_symbol.strip().upper()
+    return s.isdigit()
+
+
+def normalize_for_yfinance(raw_symbol: str) -> str:
+    """
+    給 yfinance 用的代號：
+    - 台股：0050 -> 0050.TW
+    - 其它：原樣回傳（QQQ, SPY...）
+    """
+    s = raw_symbol.strip().upper()
+    if s.isdigit():
+        return s + ".TW"
     return s
 
 
-# === 🟦 下載資料 ===
-@st.cache_data(show_spinner=False)
-def get_available_range(symbol):
-    hist = yf.Ticker(symbol).history(period="max", auto_adjust=False)
-    if hist.empty:
-        return pd.to_datetime("1990-01-01").date(), dt.date.today()
-    return hist.index.min().date(), hist.index.max().date()
+def safe_float(x):
+    if isinstance(x, (int, float)):
+        return float(x)
+    if x is None:
+        return np.nan
+    x = str(x).strip()
+    if x in ["", "-", "--", "x", "X"]:
+        return np.nan
+    return float(x.replace(",", ""))
 
 
-# === 🟦 ★★ 關鍵修復：移除異常跳價（避免 0050 2024–2025 垂直崩落） ===
-def fix_price_jumps(df, threshold=0.3):
+# -----------------------------------------------------------------------------
+# 台灣證交所歷史資料（集中市場）— 只抓日收盤價
+# -----------------------------------------------------------------------------
+def fetch_twse_history(stock_no: str, start: dt.date, end: dt.date) -> pd.DataFrame:
     """
-    修復異常跳價（例如 -70% 或 -90%），通常為除息後重算導致。
-    threshold=0.3 → 跌幅 >30% 視為異常，進行平滑化。
+    從 TWSE 官方網站抓「個股日收盤價」，使用 STOCK_DAY 月資料。
+    stock_no: '0050' / '2330'...
+    回傳欄位：Open / High / Low / Close / Volume，index = DatetimeIndex
     """
-    prices = df["Price"].copy()
-    returns = prices.pct_change()
+    all_rows = []
 
-    # 找出異常重置點（如 -0.7, -0.8）
-    jumps = returns[returns < -threshold].index
+    # 以 start 的「月份第一天」當起點，每次加一個月
+    current = dt.date(start.year, start.month, 1)
+    while current <= end:
+        date_str = current.strftime("%Y%m%d")
+        url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
+        params = {
+            "response": "json",
+            "date": date_str,
+            "stockNo": stock_no,
+        }
 
-    for idx in jumps:
         try:
-            prev = prices.loc[idx - pd.Timedelta(days=1)]
-        except:
-            continue
+            r = requests.get(url, params=params, timeout=10)
+            data_json = r.json()
+            rows = data_json.get("data", [])
+        except Exception:
+            rows = []
 
-        now = prices.loc[idx]
+        for row in rows:
+            # row 格式：[日期, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, 漲跌價差, 成交筆數]
+            date_str_tw = row[0]  # 可能是 '112/01/03' 或 '2013/12/31'
+            parts = date_str_tw.split("/")
+            if len(parts[0]) <= 3:  # 民國年
+                year = int(parts[0]) + 1911
+            else:
+                year = int(parts[0])
+            month = int(parts[1])
+            day = int(parts[2])
+            d = dt.date(year, month, day)
+            if d < start or d > end:
+                continue
 
-        if prev <= 0 or now <= 0:
-            continue
+            o = safe_float(row[3])
+            h = safe_float(row[4])
+            l = safe_float(row[5])
+            c = safe_float(row[6])
+            v = safe_float(row[1])
 
-        # 計算平滑比例
-        ratio = now / prev
+            all_rows.append(
+                {
+                    "Date": pd.to_datetime(d),
+                    "Open": o,
+                    "High": h,
+                    "Low": l,
+                    "Close": c,
+                    "Adj Close": c,  # 先暫時等於 Close，後面用拆股調整
+                    "Volume": v,
+                }
+            )
 
-        # 將所有舊資料平滑拉回
-        prices.loc[:idx] *= ratio
+        # 下一個月
+        if current.month == 12:
+            current = dt.date(current.year + 1, 1, 1)
+        else:
+            current = dt.date(current.year, current.month + 1, 1)
 
-    df["Price"] = prices
+    if not all_rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_rows)
+    df = df.set_index("Date").sort_index()
+    # 去掉重複日期
+    df = df[~df.index.duplicated(keep="first")]
     return df
 
 
-# === 使用者輸入 ===
+# -----------------------------------------------------------------------------
+# yfinance 歷史資料（含台股 .TW / 美股）
+# -----------------------------------------------------------------------------
+def fetch_yf_history(yf_symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    df_raw = yf.download(yf_symbol, start=start, end=end, auto_adjust=False)
+    if isinstance(df_raw.columns, pd.MultiIndex):
+        df_raw.columns = df_raw.columns.get_level_values(0)
+    if df_raw.empty:
+        return df_raw
+    df_raw = df_raw.sort_index()
+    df_raw = df_raw[~df_raw.index.duplicated(keep="first")]
+    return df_raw
+
+
+# -----------------------------------------------------------------------------
+# 拆股 / 斷崖 自動修正
+# -----------------------------------------------------------------------------
+def adjust_for_splits(df: pd.DataFrame, price_col: str, threshold: float = 0.3) -> pd.DataFrame:
+    """
+    針對「股價單日變動 > threshold」的日子，視為拆股或重大調整事件，
+    把「之前全部歷史價格」乘上一個比例，讓價格曲線連續，不出現垂直大斷崖。
+
+    做法：
+    - 用原始價格計算 pct_change
+    - 遇到 |變動| >= threshold 且 價格跳水 (ratio < 1) 時
+      -> ratio = 1 + r = P_t / P_{t-1}
+      -> 將 t 之前所有價格乘上 ratio
+    """
+    if df.empty or price_col not in df.columns:
+        return df
+
+    df = df.copy()
+    df["Price_raw"] = df[price_col].astype(float)
+    df["Price_adj"] = df["Price_raw"].copy()
+
+    pct = df["Price_raw"].pct_change()
+    candidates = pct[abs(pct) >= threshold].dropna()
+
+    for date, r in candidates.sort_index().items():
+        ratio = 1.0 + r  # 一般拆股會是 0.25, 0.5 之類
+        # 只處理「往下的大跳水」且 ratio > 0 才視為拆股
+        if ratio <= 0 or ratio >= 1:
+            continue
+        mask = df.index < date
+        df.loc[mask, "Price_adj"] *= ratio
+
+    return df
+
+
+# -----------------------------------------------------------------------------
+# 統一的價格載入函式（台股 -> TWSE，美股/其它 -> yfinance）
+# -----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_price_data(raw_symbol: str, yf_symbol: str, start: dt.date, end: dt.date) -> pd.DataFrame:
+    """
+    回傳欄位至少包含：Price_raw / Price_adj
+    """
+    if is_taiwan_stock(raw_symbol):
+        # 台股：TWSE API
+        df_src = fetch_twse_history(raw_symbol.strip().upper(), start, end)
+        if df_src.empty:
+            return df_src
+        df_adj = adjust_for_splits(df_src, price_col="Close", threshold=0.3)
+    else:
+        # 其它：yfinance
+        df_src = fetch_yf_history(yf_symbol, start, end)
+        if df_src.empty:
+            return df_src
+        # 優先用 Adj Close，如果沒有就用 Close
+        price_col = "Adj Close" if "Adj Close" in df_src.columns else "Close"
+        df_adj = adjust_for_splits(df_src, price_col=price_col, threshold=0.3)
+
+    return df_adj
+
+
+# -----------------------------------------------------------------------------
+# 取得可用日期區間（台股就給一個合理範圍，美股用 yfinance 回推）
+# -----------------------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def get_available_range(raw_symbol: str, yf_symbol: str):
+    if is_taiwan_stock(raw_symbol):
+        # TWSE 資料大概從 1999 之後，給個寬鬆範圍即可
+        return dt.date(1999, 1, 1), dt.date.today()
+    else:
+        hist = yf.Ticker(yf_symbol).history(period="max", auto_adjust=True)
+        if hist.empty:
+            return pd.to_datetime("1990-01-01").date(), dt.date.today()
+        return hist.index.min().date(), hist.index.max().date()
+
+
+# -----------------------------------------------------------------------------
+# 介面：使用者輸入
+# -----------------------------------------------------------------------------
 col1, col2, col3 = st.columns(3)
 with col1:
-    raw_symbol = st.text_input("輸入代號（例：00631L.TW, QQQ, 0050, 2330）", "0050")
+    raw_symbol = st.text_input("輸入代號（例：0050, 2330, 00878, QQQ）", "0050")
 
-symbol = normalize_symbol(raw_symbol)
+yf_symbol = normalize_for_yfinance(raw_symbol)
 
-
-# 自動更新可用日期
-if "last_symbol" not in st.session_state or st.session_state.last_symbol != symbol:
-    st.session_state.last_symbol = symbol
-    min_start, max_end = get_available_range(symbol)
+# 若使用者更換代號，自動偵測日期範圍
+if "last_raw_symbol" not in st.session_state or st.session_state.last_raw_symbol != raw_symbol:
+    st.session_state.last_raw_symbol = raw_symbol
+    min_start, max_end = get_available_range(raw_symbol, yf_symbol)
     st.session_state.min_start = min_start
     st.session_state.max_end = max_end
 else:
     min_start = st.session_state.min_start
     max_end = st.session_state.max_end
 
-st.info(f"🔎 {symbol} 可用資料區間：{min_start} ~ {max_end}")
+st.info(f"🔎 {raw_symbol.strip().upper()} 可用資料區間（估）：{min_start} ~ {max_end}")
 
 with col2:
     start = st.date_input(
@@ -123,67 +278,71 @@ with col6:
     initial_capital = st.number_input("投入本金（元）", 1000, 1_000_000, 10000, step=1000)
 
 
-# === 主程式 ===
+# -----------------------------------------------------------------------------
+# 主程式：回測 + 視覺化
+# -----------------------------------------------------------------------------
 if st.button("開始回測 🚀"):
-
     start_early = pd.to_datetime(start) - pd.Timedelta(days=365)
 
-    with st.spinner("資料下載中…（自動多抓一年暖機資料）"):
-        df_raw = yf.download(symbol, start=start_early, end=end, auto_adjust=False)
+    with st.spinner("資料下載與整理中…（自動多抓一年暖機資料 + 拆股調整）"):
+        df_all = load_price_data(raw_symbol, yf_symbol, start_early.date(), end)
 
-        if isinstance(df_raw.columns, pd.MultiIndex):
-            df_raw.columns = df_raw.columns.get_level_values(0)
-
-    if df_raw.empty:
-        st.error(f"⚠️ 無法下載 {symbol} 的資料")
+    if df_all.empty:
+        st.error(f"⚠️ 無法取得 {raw_symbol} 的歷史資料，請確認代號或時間區間。")
         st.stop()
 
-    # === 使用調整後股價 ===
-    price_col = "Adj Close" if "Adj Close" in df_raw.columns else "Close"
-    df = df_raw.copy()
-    df["Price"] = df[price_col]
+    # 用拆股調整後價格當作「策略判斷與績效」的基礎價格
+    df = df_all.copy()
+    df = df[(df.index >= pd.to_datetime(start_early)) & (df.index <= pd.to_datetime(end))]
+    df = df.sort_index()
 
-    # === ★ 加入跳價修復（重點）===
-    df = fix_price_jumps(df)
+    df["Price"] = df["Price_adj"]
 
     # === 均線 ===
-    df["MA"] = (
-        df["Price"].rolling(window).mean()
-        if ma_type == "SMA"
-        else df["Price"].ewm(span=window, adjust=False).mean()
-    )
+    if ma_type == "SMA":
+        df["MA"] = df["Price"].rolling(window=window).mean()
+    else:
+        df["MA"] = df["Price"].ewm(span=window, adjust=False).mean()
 
-    # === 訊號 ===
+    # 若暖機區間不足導致前面都是 NaN，就直接丟掉
+    df = df.dropna(subset=["MA"])
+
+    # === 生成訊號（第一天強制買入） ===
     df["Signal"] = 0
     df.loc[df.index[0], "Signal"] = 1
-
     for i in range(1, len(df)):
         if df["Price"].iloc[i] > df["MA"].iloc[i] and df["Price"].iloc[i - 1] <= df["MA"].iloc[i - 1]:
             df.loc[df.index[i], "Signal"] = 1
         elif df["Price"].iloc[i] < df["MA"].iloc[i] and df["Price"].iloc[i - 1] >= df["MA"].iloc[i - 1]:
             df.loc[df.index[i], "Signal"] = -1
+        else:
+            df.loc[df.index[i], "Signal"] = 0
 
     # === 持倉 ===
-    position = []
-    pos = 1
+    position, current = [], 1
     for sig in df["Signal"]:
         if sig == 1:
-            pos = 1
+            current = 1
         elif sig == -1:
-            pos = 0
-        position.append(pos)
+            current = 0
+        position.append(current)
     df["Position"] = position
 
-    # === 報酬 ===
+    # === 報酬（用拆股調整後價格） ===
     df["Return"] = df["Price"].pct_change().fillna(0)
     df["Strategy_Return"] = df["Return"] * df["Position"]
 
-    # === ★ LRS 資金曲線（不會再垂直崩落）===
-    df["Equity_LRS"] = (1 + df["Strategy_Return"]).cumprod()
+    # === 真實資金曲線 ===
+    df["Equity_LRS"] = 1.0
+    for i in range(1, len(df)):
+        if df["Position"].iloc[i - 1] == 1:
+            df.iloc[i, df.columns.get_loc("Equity_LRS")] = df["Equity_LRS"].iloc[i - 1] * (1 + df["Return"].iloc[i])
+        else:
+            df.iloc[i, df.columns.get_loc("Equity_LRS")] = df["Equity_LRS"].iloc[i - 1]
 
-    # === Buy & Hold ===
     df["Equity_BuyHold"] = (1 + df["Return"]).cumprod()
 
+    # 只保留使用者選定區間，並從第一天重新歸一化
     df = df.loc[pd.to_datetime(start): pd.to_datetime(end)].copy()
     df["Equity_LRS"] /= df["Equity_LRS"].iloc[0]
     df["Equity_BuyHold"] /= df["Equity_BuyHold"].iloc[0]
@@ -194,23 +353,23 @@ if st.button("開始回測 🚀"):
     # === 買賣點 ===
     buy_points = [(df.index[i], df["Price"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == 1]
     sell_points = [(df.index[i], df["Price"].iloc[i]) for i in range(1, len(df)) if df["Signal"].iloc[i] == -1]
-
     buy_count, sell_count = len(buy_points), len(sell_points)
 
     # === 指標 ===
     final_return_lrs = df["Equity_LRS"].iloc[-1] - 1
     final_return_bh = df["Equity_BuyHold"].iloc[-1] - 1
-
     years_len = (df.index[-1] - df.index[0]).days / 365
-    cagr_lrs = (1 + final_return_lrs) ** (1 / years_len) - 1
-    cagr_bh = (1 + final_return_bh) ** (1 / years_len) - 1
-
+    cagr_lrs = (1 + final_return_lrs) ** (1 / years_len) - 1 if years_len > 0 else np.nan
+    cagr_bh = (1 + final_return_bh) ** (1 / years_len) - 1 if years_len > 0 else np.nan
     mdd_lrs = 1 - (df["Equity_LRS"] / df["Equity_LRS"].cummax()).min()
     mdd_bh = 1 - (df["Equity_BuyHold"] / df["Equity_BuyHold"].cummax()).min()
 
     def calc_metrics(series):
         daily = series.dropna()
-        avg, std = daily.mean(), daily.std()
+        if len(daily) <= 1:
+            return np.nan, np.nan, np.nan
+        avg = daily.mean()
+        std = daily.std()
         downside = daily[daily < 0].std()
         vol = std * np.sqrt(252)
         sharpe = (avg / std) * np.sqrt(252) if std > 0 else np.nan
@@ -223,48 +382,70 @@ if st.button("開始回測 🚀"):
     equity_lrs_final = df["LRS_Capital"].iloc[-1]
     equity_bh_final = df["BH_Capital"].iloc[-1]
 
-
     # === 圖表 ===
     st.markdown("<h2 style='margin-top:1em;'>📈 策略績效視覺化</h2>", unsafe_allow_html=True)
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
-        subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold")
+        subplot_titles=("收盤價與均線（含買賣點）", "資金曲線：LRS vs Buy&Hold"),
     )
 
+    # 收盤價 -> 使用拆股調整後 Price
     fig.add_trace(
         go.Scatter(x=df.index, y=df["Price"], name="收盤價", line=dict(color="blue")),
-        row=1, col=1
+        row=1,
+        col=1,
     )
     fig.add_trace(
         go.Scatter(x=df.index, y=df["MA"], name=f"{ma_type}{window}", line=dict(color="orange")),
-        row=1, col=1
+        row=1,
+        col=1,
     )
 
     if buy_points:
         bx, by = zip(*buy_points)
-        fig.add_trace(go.Scatter(x=bx, y=by, mode="markers",
-                                 marker=dict(color="green", symbol="triangle-up", size=8),
-                                 name="買進"), row=1, col=1)
-
+        fig.add_trace(
+            go.Scatter(
+                x=bx,
+                y=by,
+                mode="markers",
+                name="買進",
+                marker=dict(color="green", symbol="triangle-up", size=8),
+            ),
+            row=1,
+            col=1,
+        )
     if sell_points:
         sx, sy = zip(*sell_points)
-        fig.add_trace(go.Scatter(x=sx, y=sy, mode="markers",
-                                 marker=dict(color="red", symbol="x", size=8),
-                                 name="賣出"), row=1, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=sx,
+                y=sy,
+                mode="markers",
+                name="賣出",
+                marker=dict(color="red", symbol="x", size=8),
+            ),
+            row=1,
+            col=1,
+        )
 
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略",
-                             line=dict(color="green")), row=2, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold",
-                             line=dict(color="gray", dash="dot")), row=2, col=1)
-
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df["Equity_LRS"], name="LRS 策略", line=dict(color="green")),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df["Equity_BuyHold"], name="Buy & Hold", line=dict(color="gray", dash="dot")),
+        row=2,
+        col=1,
+    )
     fig.update_layout(height=800, showlegend=True, template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
-
     # === 美化報表 ===
-    st.markdown("""
+    st.markdown(
+        """
     <style>
     .custom-table { width:100%; border-collapse:collapse; margin-top:1.2em; font-family:"Noto Sans TC"; }
     .custom-table th { background:#f5f6fa; padding:12px; font-weight:700; border-bottom:2px solid #ddd; }
@@ -273,7 +454,9 @@ if st.button("開始回測 🚀"):
     .custom-table tr:hover td { background-color:#f1f9ff; }
     .section-title td { background:#eef4ff; color:#1a237e; font-weight:700; font-size:16px; text-align:left; padding:10px 15px; }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+        unsafe_allow_html=True,
+    )
 
     html_table = f"""
     <table class='custom-table'>
@@ -292,4 +475,4 @@ if st.button("開始回測 🚀"):
     </tbody></table>
     """
     st.markdown(html_table, unsafe_allow_html=True)
-    st.success("✅ 回測完成！（跳價已自動修復）")
+    st.success("✅ 回測完成！（台股用 TWSE API，自動拆股調整）")
